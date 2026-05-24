@@ -678,7 +678,12 @@ __PAYLOAD__
         const free = r.resolution.freeform;
         const by = r.resolution.by;
         let resTxt = "";
-        if (choice) resTxt = `choice: <code>${escapeHtml(choice)}</code>`;
+        if (choice) {
+          const opt = Array.isArray(node.options) ? node.options.find(o => o && o.id === choice) : null;
+          resTxt = opt && opt.label
+            ? `choice: ${escapeHtml(opt.label)} <code>${escapeHtml(choice)}</code>`
+            : `choice: <code>${escapeHtml(choice)}</code>`;
+        }
         else if (free) resTxt = `freeform: ${escapeHtml(free)}`;
         if (by) resTxt += ` <span class="arrow">(by ${escapeHtml(by)})</span>`;
         if (resTxt) rows.push(`<div class="pr-row"><strong>Resolution:</strong> ${resTxt}</div>`);
