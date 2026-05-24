@@ -1,6 +1,6 @@
 """Smoke tests for the riview HTTP daemon.
 
-Run from the repo root: python3 -m unittest riview.tests.test_daemon
+Run from the repo root: python3 -m unittest tests.test_daemon
 """
 
 import json
@@ -17,9 +17,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RIVIEW_CLI = [sys.executable, str(REPO_ROOT / "riview" / "scripts" / "riview.py")]
-SAMPLE = REPO_ROOT / "riview" / "sample"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RIVIEW_CLI = [sys.executable, str(REPO_ROOT / "scripts" / "riview.py")]
+SAMPLE = REPO_ROOT / "sample"
 
 
 def _free_port() -> int:

@@ -1,0 +1,5 @@
+# Two-file spec with HTML-comment anchors
+
+A spec is two files: `<basename>.md` for human-readable narrative and `<basename>.decisions.json` for the structured graph of nodes, keyed by stable IDs. Each node's prose body in the markdown is wrapped in matched HTML comments — `<!-- node:<id> -->` … `<!-- /node:<id> -->` — and the applier replaces only the content between matched anchors when a review carries a `body_edit`.
+
+The split lets us keep the readable, diff-friendly half (markdown) untouched by structure, and the structured half (JSON) untouched by prose. Alternatives considered: a single YAML/JSON document with embedded markdown (loses prose-friendliness for reviewers reading the raw file), or parsing the markdown into an AST and round-tripping it (fragile across editors and review tooling — anchor comments survive any markdown processor because they're literally HTML). The anchor convention is invisible in rendered markdown but acts as a stable, copy-paste-safe insertion point for the applier.

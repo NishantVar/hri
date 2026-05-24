@@ -1,0 +1,7 @@
+# Two-file apply is not transactional across `<basename>.md` and `<basename>.decisions.json`
+
+Each file is crash-hardened individually: tempfile → `os.fsync(file)` → `os.replace` → best-effort `os.fsync(parent_dir)`. But `apply.py` writes the sidecar then the markdown sequentially, without staging both writes behind a single atomic swap. A crash between the two writes leaves the sidecar at the new `version` while the markdown still reflects the prior version. The apply pass is deterministic, but a plain re-run does **not** recover: the bumped sidecar fails the delta's `spec_version` check. Recovery is to use git — restore the pair to a consistent pre-apply state (e.g. `git checkout -- <basename>.md <basename>.decisions.json`) and run `apply.py` again. (`--force` is available for deliberate re-application against a different version, but it creates another apply pass and rewrites `applied_from_review`.)
+
+Alternative considered: write both files into a staging directory, then atomically move them into place (or use a journal file the applier consults on next start). Rejected — for a single-user local-only tool whose actual revision history is git, the cost of a staging strategy (a shadow tree, careful crash recovery, more code to reason about) outweighs the benefit. The user can detect the inconsistency by re-running, and `git status` will show the half-written state.
+
+If RIView ever grows multi-user or remote operation, revisit this.
