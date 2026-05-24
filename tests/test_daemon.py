@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -254,6 +255,264 @@ class RiviewDaemonTests(unittest.TestCase):
         self.assertNotIn("submit-config", body)
         # Should explain what failed.
         self.assertIn("failed validation", body)
+
+    def _post_review(self, sid: str, review: dict) -> dict:
+        req = urllib.request.Request(
+            self.base + f"/sessions/{sid}/review",
+            data=json.dumps(review).encode("utf-8"),
+            method="POST",
+            headers={
+                "X-Riview-Token": self._token(),
+                "Content-Type": "application/json",
+            },
+        )
+        resp = urllib.request.urlopen(req)
+        return json.loads(resp.read().decode("utf-8"))
+
+    def test_review_post_merges_by_node_id(self):
+        # Two POSTs land on the same revision. Later entries upsert older ones
+        # by node_id; sort-by-node_id keeps the on-disk blob deterministic.
+        sid = self._submit_sample()
+        first = {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "ai-confident"},
+                {"node_id": "risk-bg", "comment": "first pass"},
+            ],
+        }
+        second = {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviewer": "humans",
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "comment": "settled"},  # upsert
+                {"node_id": "deci-notify", "comment": "added later"},  # new
+            ],
+        }
+        p1 = self._post_review(sid, first)
+        p2 = self._post_review(sid, second)
+        self.assertEqual(p2["review_count"], 3)
+        self.assertGreater(p2["event_seq"], p1["event_seq"])
+        merged = json.loads(
+            subprocess.run(
+                RIVIEW_CLI + ["pull", sid],
+                env=self.env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )
+        ids = [e["node_id"] for e in merged["reviews"]]
+        self.assertEqual(ids, ["deci-notify", "deci-platform", "risk-bg"])
+        plat = next(e for e in merged["reviews"] if e["node_id"] == "deci-platform")
+        self.assertEqual(plat["new_status"], "confirmed")
+        self.assertEqual(plat["comment"], "settled")
+        # Latest top-level fields win.
+        self.assertEqual(merged.get("reviewer"), "humans")
+
+    def test_review_post_rejects_non_list_reviews(self):
+        sid = self._submit_sample()
+        req = urllib.request.Request(
+            self.base + f"/sessions/{sid}/review",
+            data=json.dumps({"spec_id": "pomodoro-mvp", "spec_version": 1,
+                             "reviews": "nope"}).encode("utf-8"),
+            method="POST",
+            headers={"X-Riview-Token": self._token(),
+                     "Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req).read()
+        self.assertEqual(cm.exception.code, 400)
+
+    def test_review_post_rejects_entry_without_node_id(self):
+        sid = self._submit_sample()
+        body = {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [{"comment": "no id"}],
+        }
+        req = urllib.request.Request(
+            self.base + f"/sessions/{sid}/review",
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={"X-Riview-Token": self._token(),
+                     "Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req).read()
+        self.assertEqual(cm.exception.code, 400)
+
+    def test_review_post_drops_empty_entries_silently(self):
+        # An entry with only node_id (no status/comment/resolution/body_edit)
+        # must NOT clobber a prior real review for the same node on merge.
+        sid = self._submit_sample()
+        first = self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed", "comment": "ship it"},
+            ],
+        })
+        self.assertEqual(first["review_count"], 1)
+        # Empty entry for the same node — should be filtered, prior entry preserved.
+        second = self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [{"node_id": "deci-platform"}],
+        })
+        self.assertEqual(second["review_count"], 1)
+        merged = json.loads(
+            subprocess.run(
+                RIVIEW_CLI + ["pull", sid],
+                env=self.env, capture_output=True, text=True, check=True,
+            ).stdout
+        )
+        plat = next(e for e in merged["reviews"] if e["node_id"] == "deci-platform")
+        self.assertEqual(plat.get("new_status"), "confirmed")
+        self.assertEqual(plat.get("comment"), "ship it")
+
+    def test_review_post_rejects_unknown_node_id(self):
+        # apply.py would reject the whole delta later; reject at POST time so
+        # the on-disk review.json stays clean.
+        sid = self._submit_sample()
+        body = {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [{"node_id": "not-a-real-node", "comment": "x"}],
+        }
+        req = urllib.request.Request(
+            self.base + f"/sessions/{sid}/review",
+            data=json.dumps(body).encode("utf-8"),
+            method="POST",
+            headers={"X-Riview-Token": self._token(),
+                     "Content-Type": "application/json"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(req).read()
+        self.assertEqual(cm.exception.code, 409)
+
+    def test_wait_returns_immediately_when_behind(self):
+        sid = self._submit_sample()  # submit bumps event_seq to 1
+        body = urllib.request.urlopen(
+            self.base + f"/sessions/{sid}/wait?since=0&timeout=2"
+        ).read().decode("utf-8")
+        payload = json.loads(body)
+        self.assertEqual(payload["session_id"], sid)
+        self.assertGreaterEqual(payload["event_seq"], 1)
+        self.assertEqual(payload["revision"], 1)
+        self.assertEqual(payload["status"], "awaiting_review")
+
+    def test_wait_times_out_with_204(self):
+        sid = self._submit_sample()
+        snap = json.loads(
+            urllib.request.urlopen(
+                self.base + f"/sessions/{sid}/wait?since=0&timeout=1"
+            ).read().decode("utf-8")
+        )
+        # Now wait past the latest event_seq with a short timeout — no new
+        # events arrive, so the server should return 204.
+        resp = urllib.request.urlopen(
+            self.base + f"/sessions/{sid}/wait?since={snap['event_seq']}&timeout=1"
+        )
+        self.assertEqual(resp.status, 204)
+        self.assertEqual(resp.read(), b"")
+
+    def test_wait_wakes_on_review_post(self):
+        sid = self._submit_sample()
+        snap0 = json.loads(
+            urllib.request.urlopen(
+                self.base + f"/sessions/{sid}/wait?since=0&timeout=1"
+            ).read().decode("utf-8")
+        )
+        result: dict = {}
+
+        def long_poll():
+            try:
+                body = urllib.request.urlopen(
+                    self.base + f"/sessions/{sid}/wait?since={snap0['event_seq']}&timeout=5"
+                ).read().decode("utf-8")
+                result["payload"] = json.loads(body)
+            except Exception as e:  # noqa: BLE001
+                result["err"] = repr(e)
+
+        t = threading.Thread(target=long_poll)
+        t.start()
+        # Give the daemon a beat to enter cond.wait.
+        time.sleep(0.2)
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [{"node_id": "deci-platform", "comment": "ping"}],
+        })
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive(), "long-poll never returned")
+        self.assertNotIn("err", result, result.get("err", ""))
+        self.assertGreater(result["payload"]["event_seq"], snap0["event_seq"])
+        self.assertEqual(result["payload"]["status"], "review_submitted")
+
+    def test_events_emits_default_message(self):
+        # EventSource.onmessage only fires for unnamed/default events. If the
+        # server emits `event: <name>` lines, the browser banner stops working.
+        # Lock the frame format down so a future refactor can't regress.
+        sid = self._submit_sample()
+        body_frame: dict = {}
+
+        def reader():
+            try:
+                with urllib.request.urlopen(self.base + f"/sessions/{sid}/events") as r:
+                    buf = b""
+                    deadline = time.monotonic() + 5.0
+                    while b"\n\n" not in buf and time.monotonic() < deadline:
+                        # read1 returns whatever the underlying socket has,
+                        # so we don't block forever waiting for a full buffer
+                        # of bytes (subsequent SSE frames are 15s apart).
+                        chunk = r.read1(1024)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    body_frame["raw"] = buf.decode("utf-8")
+            except Exception as e:  # noqa: BLE001
+                body_frame["err"] = repr(e)
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+        t.join(timeout=5)
+        self.assertNotIn("err", body_frame, body_frame.get("err", ""))
+        raw = body_frame.get("raw", "")
+        # First frame should be a default-event `data: ...` block, NOT a named
+        # event. The handler emits the snapshot frame as soon as it opens.
+        self.assertIn("data:", raw)
+        self.assertNotIn("event:", raw)
+
+    def test_wait_404_on_missing_session(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(
+                self.base + "/sessions/deadbeefdead/wait?since=0&timeout=1"
+            ).read()
+        self.assertEqual(cm.exception.code, 404)
+
+    def test_cli_wait_unblocks_on_review_post(self):
+        sid = self._submit_sample()
+        # Launch `riview wait` in the background; it'll long-poll until our POST.
+        proc = subprocess.Popen(
+            RIVIEW_CLI + ["wait", sid, "--timeout", "10", "--url", self.base],
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.3)
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [{"node_id": "deci-platform", "comment": "cli ping"}],
+        })
+        stdout, stderr = proc.communicate(timeout=8)
+        self.assertEqual(proc.returncode, 0, stderr.decode("utf-8", "replace"))
+        payload = json.loads(stdout.decode("utf-8").splitlines()[-1])
+        self.assertEqual(payload["session_id"], sid)
+        self.assertEqual(payload["status"], "review_submitted")
 
     def test_token_file_perms_0600(self):
         self._submit_sample()

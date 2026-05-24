@@ -1,13 +1,13 @@
 {
   "spec_id": "pomodoro-mvp",
   "spec_title": "Pomodoro Timer MVP",
-  "source_path": "spec.rev2.md",
+  "source_path": "spec.md",
   "version": 3,
-  "generated_at": "2026-05-23T13:28:34+00:00",
+  "generated_at": "2026-05-24T09:40:54+00:00",
   "applied_from_review": {
     "review_path": "review-demo-2.json",
     "reviewed_at": "2026-05-23T20:00:00Z",
-    "applied_at": "2026-05-23T13:28:34+00:00",
+    "applied_at": "2026-05-24T09:40:54+00:00",
     "review_count": 2,
     "empty_entries_skipped": 0,
     "body_edits": []

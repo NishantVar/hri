@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Apply a RIView review delta to a spec, producing <basename>.rev<N>.{md,decisions.json}.
+"""Apply a RIView review delta to a spec, overwriting <basename>.{md,decisions.json} in place.
 
 Usage:
     python3 apply.py <spec-dir> <review.json> [--basename NAME] [--force] [--dry-run]
 
-The applier never mutates originals in place. It always writes a new
-<basename>.rev<N>.md / <basename>.rev<N>.decisions.json pair next to the
-source, where N is the next integer after any existing revisions for that
-basename. Default basename is "spec"; pass --basename mvp to target mvp.md.
+The applier overwrites the originals atomically (tempfile → fsync → os.replace).
+Git is the history; the rewritten decisions.json carries an `applied_from_review`
+audit block plus per-node `review` metadata describing the latest pass.
 
 Invariants enforced:
     - delta.spec_version must equal the current spec.version (use --force to override).
@@ -26,8 +25,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,21 +38,33 @@ VALID_STATUS = {
     "risk": {"open", "accepted", "mitigated", "dismissed"},
 }
 
-def find_latest(spec_dir: Path, basename: str) -> tuple[Path, Path, int]:
-    """Return (md_path, json_path, current_version_n) for the latest revision."""
-    md = spec_dir / f"{basename}.md"
-    js = spec_dir / f"{basename}.decisions.json"
-    rev_re = re.compile(rf"^{re.escape(basename)}\.rev(\d+)\.decisions\.json$")
-    latest_n = 0
-    for child in spec_dir.iterdir():
-        m = rev_re.match(child.name)
-        if m:
-            n = int(m.group(1))
-            if n > latest_n:
-                latest_n = n
-                js = child
-                md = spec_dir / f"{basename}.rev{n}.md"
-    return md, js, latest_n
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=path.suffix or "")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        # Best-effort: fsync the parent directory so the rename survives a
+        # crash, not just the file contents. Skip silently on platforms where
+        # directory fsync is unsupported.
+        try:
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def replace_anchor(md_text: str, anchor: str, new_body: str) -> str:
@@ -137,7 +150,6 @@ def apply_review(
     md_text: str,
     delta: dict,
     review_path: Path,
-    rev_n: int,
     force: bool,
     basename: str = "spec",
 ) -> tuple[dict, str, list[str], list[str]]:
@@ -233,10 +245,9 @@ def apply_review(
         }
         applied += 1
 
-    new_rev_n = rev_n + 1
     spec["version"] = spec.get("version", 1) + 1
     spec["generated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    spec["source_path"] = f"{basename}.rev{new_rev_n}.md"
+    spec["source_path"] = f"{basename}.md"
     spec["applied_from_review"] = {
         "review_path": source_name,
         "reviewed_at": reviewed_at,
@@ -258,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true",
                         help="Allow version mismatch (delta reviewed a different spec version).")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Print the new spec and md to stdout instead of writing files.")
+                        help="Print the new spec and md to stdout instead of overwriting files.")
     args = parser.parse_args(argv)
 
     if not args.spec_dir.is_dir():
@@ -268,16 +279,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"review file not found: {args.review_path}", file=sys.stderr)
         return 2
 
-    md_path, json_path, latest_n = find_latest(args.spec_dir, args.basename)
+    md_path = args.spec_dir / f"{args.basename}.md"
+    json_path = args.spec_dir / f"{args.basename}.decisions.json"
     if not md_path.exists() or not json_path.exists():
         print(f"missing {md_path.name} or {json_path.name} in {args.spec_dir}", file=sys.stderr)
         return 2
+
     spec = json.loads(json_path.read_text())
     md_text = md_path.read_text()
     delta = json.loads(args.review_path.read_text())
 
     new_spec, new_md, fatal, warnings = apply_review(
-        spec, md_text, delta, args.review_path, latest_n, args.force, args.basename,
+        spec, md_text, delta, args.review_path, args.force, args.basename,
     )
 
     for w in warnings:
@@ -288,21 +301,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {e}", file=sys.stderr)
         return 3
 
-    next_n = latest_n + 1
-    out_json = args.spec_dir / f"{args.basename}.rev{next_n}.decisions.json"
-    out_md = args.spec_dir / f"{args.basename}.rev{next_n}.md"
+    new_json_bytes = (json.dumps(new_spec, indent=2) + "\n").encode("utf-8")
+    new_md_bytes = new_md.encode("utf-8")
 
     if args.dry_run:
-        print(json.dumps(new_spec, indent=2))
+        sys.stdout.write(new_json_bytes.decode("utf-8"))
         print(f"--- {args.basename}.md ---")
-        print(new_md)
+        sys.stdout.write(new_md)
         return 0
 
-    out_json.write_text(json.dumps(new_spec, indent=2) + "\n")
-    out_md.write_text(new_md)
+    atomic_write_bytes(json_path, new_json_bytes)
+    atomic_write_bytes(md_path, new_md_bytes)
     info = new_spec["applied_from_review"]
-    print(f"wrote {out_json}")
-    print(f"wrote {out_md}")
+    print(f"updated {json_path}")
+    print(f"updated {md_path}")
     print(
         f"applied {info['review_count']} review(s)"
         + (f", skipped {info['empty_entries_skipped']} empty"

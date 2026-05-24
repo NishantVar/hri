@@ -90,6 +90,21 @@ class ValidateHardeningTests(unittest.TestCase):
         errs = render.validate(spec, {"<x>": 1})
         self.assertTrue(any("source_anchor" in e for e in errs), errs)
 
+    def test_rejects_depends_on_unknown_id(self):
+        spec, anchors = _spec(depends_on=["does-not-exist"])
+        errs = render.validate(spec, anchors)
+        self.assertTrue(any("depends_on" in e and "unknown" in e for e in errs), errs)
+
+    def test_rejects_depends_on_hostile_id(self):
+        spec, anchors = _spec(depends_on=["<script>"])
+        errs = render.validate(spec, anchors)
+        self.assertTrue(any("depends_on" in e for e in errs), errs)
+
+    def test_rejects_depends_on_non_list(self):
+        spec, anchors = _spec(depends_on="n1")
+        errs = render.validate(spec, anchors)
+        self.assertTrue(any("depends_on must be a list" in e for e in errs), errs)
+
 
 if __name__ == "__main__":
     unittest.main()

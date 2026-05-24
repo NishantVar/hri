@@ -83,8 +83,26 @@ def validate(spec: dict, anchor_counts: dict[str, int]) -> list[str]:
     errors: list[str] = []
     seen_ids: set[str] = set()
     declared_anchors: set[str] = set()
+    all_ids = {
+        n.get("id") for n in spec["nodes"]
+        if isinstance(n, dict) and isinstance(n.get("id"), str)
+    }
     for node in spec["nodes"]:
         nid = node["id"]
+        deps = node.get("depends_on")
+        if deps is not None:
+            if not isinstance(deps, list):
+                errors.append(f"node {nid}: depends_on must be a list, got {type(deps).__name__}")
+            else:
+                for dep in deps:
+                    if not isinstance(dep, str) or not ID_RE.fullmatch(dep):
+                        errors.append(
+                            f"node {nid}: depends_on entry {dep!r} must match [A-Za-z0-9_-]+"
+                        )
+                    elif dep not in all_ids:
+                        errors.append(
+                            f"node {nid}: depends_on references unknown node id {dep!r}"
+                        )
         if not isinstance(nid, str) or not ID_RE.fullmatch(nid):
             errors.append(
                 f"node id {nid!r}: must match [A-Za-z0-9_-]+ (id is interpolated into HTML attributes)"
@@ -140,6 +158,50 @@ def validate(spec: dict, anchor_counts: dict[str, int]) -> list[str]:
     return errors
 
 
+def topo_order(nodes: list[dict]) -> list[dict]:
+    """Kahn's topological sort. Ties broken by id (ascending). Cycle-safe:
+    nodes left over after the main pass (i.e. nodes participating in a cycle)
+    are appended in id order at the end. Dependencies pointing at unknown ids
+    are ignored for ordering; render.validate() is expected to reject those
+    upstream, so the leftover loop is defensive."""
+    import heapq
+    by_id = {n["id"]: n for n in nodes}
+    indeg: dict[str, int] = {nid: 0 for nid in by_id}
+    children: dict[str, list[str]] = {nid: [] for nid in by_id}
+    for n in nodes:
+        for dep in n.get("depends_on") or []:
+            if dep in by_id:
+                indeg[n["id"]] += 1
+                children[dep].append(n["id"])
+    ready = [nid for nid, d in indeg.items() if d == 0]
+    heapq.heapify(ready)
+    out: list[str] = []
+    while ready:
+        nid = heapq.heappop(ready)
+        out.append(nid)
+        for child in sorted(children[nid]):
+            indeg[child] -= 1
+            if indeg[child] == 0:
+                heapq.heappush(ready, child)
+    seen = set(out)
+    for nid in sorted(by_id):
+        if nid not in seen:
+            out.append(nid)
+    return [by_id[nid] for nid in out]
+
+
+def compute_affects(nodes: list[dict]) -> dict[str, list[str]]:
+    """Reverse depends_on: affects[X] = sorted ids of nodes that depend on X."""
+    affects: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+    for n in nodes:
+        for dep in n.get("depends_on") or []:
+            if dep in affects:
+                affects[dep].append(n["id"])
+    for k in affects:
+        affects[k].sort()
+    return affects
+
+
 def summary_counts(spec: dict) -> dict:
     counts = {
         "decision": {"ai-confident": 0, "confirmed": 0, "rejected": 0, "needs-work": 0},
@@ -161,13 +223,15 @@ def build_html(
     submit_url: str = "",
     submit_token: str = "",
 ) -> str:
-    # Attach rendered body markdown to each node for the JS-free fallback view.
+    ordered = topo_order(spec["nodes"])
+    affects = compute_affects(spec["nodes"])
     enriched_nodes = []
-    for node in spec["nodes"]:
+    for node in ordered:
         n = dict(node)
         body_md = bodies.get(node["source_anchor"], "")
         n["_body_html"] = md_to_html(body_md)
         n["_body_md"] = body_md
+        n["_affects"] = affects.get(node["id"], [])
         enriched_nodes.append(n)
 
     counts = summary_counts(spec)
@@ -347,6 +411,92 @@ TEMPLATE = r"""<!doctype html>
     font-size: 16px;
     font-weight: 600;
     flex-basis: 100%;
+  }
+  .chips {
+    flex-basis: 100%;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 2px;
+    font-size: 11px;
+  }
+  .chips .chip-label {
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 10px;
+    align-self: center;
+    margin-right: 2px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    text-decoration: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+  }
+  .chip:hover, .chip:focus-visible { border-color: var(--accent); color: var(--fg); }
+  .stale-badge {
+    display: none;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--touched-border);
+    background: var(--touched-bg);
+    color: var(--status-needs-work);
+    font-weight: 600;
+    align-items: center;
+    gap: 3px;
+  }
+  .card.upstream-stale .stale-badge { display: inline-flex; }
+  .card:target { outline: 2px solid var(--accent); outline-offset: 4px; }
+  html { scroll-padding-top: 96px; }
+  .card-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 10px;
+  }
+  .card-actions .card-status {
+    color: var(--muted);
+    font-size: 12px;
+    margin-left: auto;
+  }
+  .card-actions .card-status.error { color: var(--status-rejected); }
+  .card-actions .card-status.ok { color: var(--status-confirmed); }
+  .review textarea[aria-invalid="true"] { border-color: var(--status-rejected); }
+  .review textarea:user-invalid { border-color: var(--status-rejected); }
+  .reload-banner {
+    position: sticky;
+    top: 64px;
+    margin: 12px auto 0;
+    max-width: 880px;
+    padding: 10px 14px;
+    background: var(--touched-bg);
+    border: 1px solid var(--touched-border);
+    border-radius: 6px;
+    display: none;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    z-index: 9;
+    animation: bannerIn 200ms ease-out;
+  }
+  .reload-banner.visible { display: flex; }
+  .reload-banner .banner-msg { color: var(--fg); flex: 1; }
+  .reload-banner code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  @keyframes bannerIn {
+    from { transform: translateY(-6px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .reload-banner { animation: none; }
+    .card { transition: none; }
   }
   .card .id {
     color: var(--muted);
@@ -566,6 +716,11 @@ TEMPLATE = r"""<!doctype html>
   <div class="counts" id="counts"></div>
 </header>
 
+<div class="reload-banner" id="reload-banner" role="status" aria-live="polite">
+  <span class="banner-msg">Spec updated to revision <code id="banner-rev">?</code> — your in-progress reviews will be preserved on the server. Reload to see the new content.</span>
+  <button type="button" class="primary" id="banner-reload-btn">Reload</button>
+</div>
+
 <main>
   <div id="nodes"></div>
 </main>
@@ -577,6 +732,7 @@ TEMPLATE = r"""<!doctype html>
   <div class="toolbar">
     <input type="text" id="filter" class="filter-input" placeholder="Filter by id/title/kind">
     <button type="button" class="secondary" id="reset-btn">Reset</button>
+    <button type="button" class="primary" id="submit-all-btn" hidden disabled>Submit all</button>
     <button type="button" class="primary" id="export-btn" disabled>Export Reviews</button>
   </div>
 </div>
@@ -650,6 +806,19 @@ __SUBMIT__
     };
   });
 
+  function isTouchedState(s) {
+    return Boolean(s.new_status) || Boolean(s.comment.trim()) || s.resolution !== null;
+  }
+
+  function recomputeStaleness() {
+    SPEC.nodes.forEach(n => {
+      const deps = Array.isArray(n.depends_on) ? n.depends_on : [];
+      const upstreamTouched = deps.some(d => state[d] && isTouchedState(state[d]));
+      const el = document.getElementById("card-" + n.id);
+      if (el) el.classList.toggle("upstream-stale", upstreamTouched);
+    });
+  }
+
   function renderCounts() {
     const c = SPEC.counts;
     const parts = [];
@@ -662,21 +831,35 @@ __SUBMIT__
   function renderCard(node) {
     const card = document.createElement("section");
     card.className = "card";
+    card.id = "card-" + node.id;
     card.dataset.nodeId = node.id;
     card.dataset.kind = node.kind;
-    card.dataset.searchText = (node.id + " " + node.title + " " + node.kind).toLowerCase();
+    const depList = Array.isArray(node.depends_on) ? node.depends_on : [];
+    const affList = Array.isArray(node._affects) ? node._affects : [];
+    const chipText = depList.concat(affList).join(" ");
+    card.dataset.searchText = (node.id + " " + node.title + " " + node.kind + " " + chipText).toLowerCase();
 
     // Head. Enum fields (kind/status/severity) are validated by the Python
     // renderer, but escape them anyway — daemon pages embed the auth token,
     // so a renderer-side injection would let a hostile sidecar exfil it.
     const head = document.createElement("div");
     head.className = "head";
+    function chipsRow(label, ids) {
+      if (!ids.length) return "";
+      const chips = ids.map(id =>
+        `<a class="chip" href="#card-${escapeHtml(id)}">${escapeHtml(id)}</a>`
+      ).join("");
+      return `<div class="chips"><span class="chip-label">${label}</span>${chips}</div>`;
+    }
     head.innerHTML = `
       <span class="badge kind-${escapeHtml(node.kind)}">${escapeHtml(node.kind)}</span>
       <span class="badge status status-${escapeHtml(node.status)}">${escapeHtml(node.status)}</span>
       ${node.kind === "risk" ? `<span class="badge sev-${escapeHtml(node.severity)}">${escapeHtml(node.severity)} severity</span>` : ""}
+      <span class="stale-badge" title="An upstream decision has unsubmitted changes — review may need recalibration.">↑ upstream changed</span>
       <span class="id">${escapeHtml(node.id)}</span>
       <h2>${escapeHtml(node.title)}</h2>
+      ${chipsRow("depends on", depList)}
+      ${chipsRow("affects", affList)}
     `;
     card.appendChild(head);
 
@@ -806,6 +989,11 @@ __SUBMIT__
       <textarea data-role="comment" placeholder="Notes for the author agent..."></textarea>
     </label>`;
 
+    html += `<div class="card-actions">
+      <button type="button" class="primary card-submit" data-role="card-submit" hidden disabled>Submit decision</button>
+      <span class="card-status" data-role="card-status"></span>
+    </div>`;
+
     review.innerHTML = html;
     card.appendChild(review);
 
@@ -814,16 +1002,65 @@ __SUBMIT__
     const commentTa = review.querySelector('[data-role="comment"]');
     const radios = review.querySelectorAll('input[type="radio"]');
     const freeformTa = review.querySelector('[data-role="freeform"]');
+    const cardSubmitBtn = review.querySelector('[data-role="card-submit"]');
+    const cardStatusEl = review.querySelector('[data-role="card-status"]');
 
     function updateTouched() {
       const s = state[node.id];
-      const isTouched = Boolean(s.new_status) || Boolean(s.comment.trim()) || s.resolution !== null;
-      card.classList.toggle("touched", isTouched);
+      const touched = isTouchedState(s);
+      card.classList.toggle("touched", touched);
+      if (cardSubmitBtn) cardSubmitBtn.disabled = !touched;
+      // Clear stale "ok" status messages once the user starts editing again.
+      if (cardStatusEl && cardStatusEl.classList.contains("ok")) {
+        cardStatusEl.textContent = "";
+        cardStatusEl.classList.remove("ok");
+      }
       recomputeFooter();
+      recomputeStaleness();
+    }
+
+    if (cardSubmitBtn) {
+      cardSubmitBtn.addEventListener("click", async () => {
+        const entry = buildEntryForNode(node);
+        if (entry === "invalid") {
+          cardStatusEl.textContent = "Pick or write a resolution before submitting.";
+          cardStatusEl.classList.add("error");
+          cardStatusEl.classList.remove("ok");
+          if (freeformTa) freeformTa.setAttribute("aria-invalid", "true");
+          return;
+        }
+        if (!entry) return;
+        cardSubmitBtn.disabled = true;
+        cardStatusEl.textContent = "Submitting...";
+        cardStatusEl.classList.remove("error", "ok");
+        try {
+          const data = await postReviews([entry]);
+          cardStatusEl.textContent = "Submitted (rev " + (data.revision || "?") + ", " + (data.review_count || 1) + " on server)";
+          cardStatusEl.classList.add("ok");
+        } catch (err) {
+          cardStatusEl.textContent = "Failed: " + (err && err.message ? err.message : err);
+          cardStatusEl.classList.add("error");
+          cardSubmitBtn.disabled = false;
+        }
+      });
     }
 
     statusSel.addEventListener("change", () => {
       state[node.id].new_status = statusSel.value;
+      // If the user manually changes an ambiguity's status away from
+      // "resolved", drop any selected resolution so we never emit a delta
+      // that apply.py rejects ("resolution provided but effective status
+      // is not 'resolved'").
+      if (node.kind === "ambiguity" && statusSel.value !== "resolved") {
+        state[node.id].resolution = null;
+        review.querySelectorAll('input[type="radio"]').forEach(r => { r.checked = false; });
+        review.querySelectorAll(".options li").forEach(x => x.classList.remove("selected"));
+        if (freeformTa) {
+          freeformTa.style.display = "none";
+          freeformTa.required = false;
+          freeformTa.setAttribute("aria-invalid", "false");
+        }
+      }
       updateTouched();
     });
     commentTa.addEventListener("input", () => {
@@ -852,14 +1089,20 @@ __SUBMIT__
         if (r.value === "__freeform__") {
           if (freeformTa) {
             freeformTa.style.display = "block";
+            freeformTa.required = true;
             freeformTa.focus();
             const text = (freeformTa.value || "").trim();
             state[node.id].resolution = text ? { freeform: freeformTa.value } : null;
+            freeformTa.setAttribute("aria-invalid", text ? "false" : "true");
           } else {
             state[node.id].resolution = null;
           }
         } else {
-          if (freeformTa) freeformTa.style.display = "none";
+          if (freeformTa) {
+            freeformTa.style.display = "none";
+            freeformTa.required = false;
+            freeformTa.setAttribute("aria-invalid", "false");
+          }
           state[node.id].resolution = { choice_id: r.value };
         }
         maybeAutoResolve();
@@ -870,6 +1113,7 @@ __SUBMIT__
       freeformTa.addEventListener("input", () => {
         const text = freeformTa.value;
         state[node.id].resolution = text.trim() ? { freeform: text } : null;
+        freeformTa.setAttribute("aria-invalid", text.trim() ? "false" : "true");
         maybeAutoResolve();
         updateTouched();
       });
@@ -879,44 +1123,86 @@ __SUBMIT__
   }
 
   function recomputeFooter() {
-    const touched = Object.values(state).filter(s =>
-      Boolean(s.new_status) || Boolean(s.comment.trim()) || s.resolution !== null
-    ).length;
+    const touched = Object.values(state).filter(isTouchedState).length;
     document.getElementById("touched-count").textContent = touched;
     document.getElementById("export-btn").disabled = touched === 0;
+    const submitAllBtn = document.getElementById("submit-all-btn");
+    if (submitAllBtn) submitAllBtn.disabled = touched === 0;
+  }
+
+  function flashBanner(msg, isError) {
+    const banner = document.getElementById("reload-banner");
+    const msgEl = banner.querySelector(".banner-msg");
+    msgEl.textContent = msg;
+    banner.classList.add("visible");
+    banner.classList.toggle("error", Boolean(isError));
+    // Auto-dismiss non-revision banners after 6s.
+    if (!banner.dataset.persistent) {
+      setTimeout(() => {
+        if (!banner.dataset.persistent) banner.classList.remove("visible");
+      }, 6000);
+    }
+  }
+
+  function showRevisionBanner(revision) {
+    const banner = document.getElementById("reload-banner");
+    const revEl = document.getElementById("banner-rev");
+    revEl.textContent = String(revision);
+    banner.querySelector(".banner-msg").innerHTML =
+      'Spec updated to revision <code id="banner-rev">' + revision +
+      '</code> — your in-progress reviews will be preserved on the server. Reload to see the new content.';
+    banner.dataset.persistent = "1";
+    banner.classList.add("visible");
+  }
+
+  function subscribeToEvents() {
+    if (!window.EventSource || !SUBMIT.url) return;
+    const eventsUrl = SUBMIT.url.replace(/\/review$/, "/events");
+    let es;
+    try {
+      es = new EventSource(eventsUrl);
+    } catch (_) { return; }
+    es.onmessage = (e) => {
+      let data;
+      try { data = JSON.parse(e.data); } catch (_) { return; }
+      if (typeof data.revision === "number" && data.revision > SPEC.version) {
+        showRevisionBanner(data.revision);
+      }
+    };
+    // EventSource auto-reconnects on transient errors; nothing to do on onerror.
+  }
+
+  function buildEntryForNode(n) {
+    const s = state[n.id];
+    const hasStatus = Boolean(s.new_status);
+    const hasComment = Boolean(s.comment.trim());
+    const hasResolution = s.resolution !== null && (
+      (s.resolution.choice_id) ||
+      (s.resolution.freeform && s.resolution.freeform.trim())
+    );
+    if (!hasStatus && !hasComment && !hasResolution) return null;
+    if (n.kind === "ambiguity" && s.new_status === "resolved" && !hasResolution) return "invalid";
+    const entry = { node_id: n.id };
+    if (hasStatus) entry.new_status = s.new_status;
+    if (hasResolution) {
+      const r = {};
+      if (s.resolution.choice_id) r.choice_id = s.resolution.choice_id;
+      if (s.resolution.freeform && s.resolution.freeform.trim()) {
+        r.freeform = s.resolution.freeform.trim();
+      }
+      entry.resolution = r;
+    }
+    if (hasComment) entry.comment = s.comment.trim();
+    return entry;
   }
 
   function buildDelta() {
     const reviews = [];
     const dropped = [];
     SPEC.nodes.forEach(n => {
-      const s = state[n.id];
-      const hasStatus = Boolean(s.new_status);
-      const hasComment = Boolean(s.comment.trim());
-      const hasResolution = s.resolution !== null && (
-        (s.resolution.choice_id) ||
-        (s.resolution.freeform && s.resolution.freeform.trim())
-      );
-      if (!hasStatus && !hasComment && !hasResolution) return;
-
-      // Safety net: never emit an ambiguity entry whose status=resolved but resolution is missing/invalid.
-      if (n.kind === "ambiguity" && s.new_status === "resolved" && !hasResolution) {
-        dropped.push(n.id);
-        return;
-      }
-
-      const entry = { node_id: n.id };
-      if (hasStatus) entry.new_status = s.new_status;
-      if (hasResolution) {
-        const r = {};
-        if (s.resolution.choice_id) r.choice_id = s.resolution.choice_id;
-        if (s.resolution.freeform && s.resolution.freeform.trim()) {
-          r.freeform = s.resolution.freeform.trim();
-        }
-        entry.resolution = r;
-      }
-      if (hasComment) entry.comment = s.comment.trim();
-      reviews.push(entry);
+      const entry = buildEntryForNode(n);
+      if (entry === "invalid") { dropped.push(n.id); return; }
+      if (entry) reviews.push(entry);
     });
     reviews.sort((a, b) => a.node_id < b.node_id ? -1 : (a.node_id > b.node_id ? 1 : 0));
     return {
@@ -930,6 +1216,32 @@ __SUBMIT__
       dropped: dropped
     };
   }
+
+  async function postReviews(reviewEntries) {
+    if (!SUBMIT.url) throw new Error("no submit URL configured");
+    const body = JSON.stringify({
+      spec_id: SPEC.spec_id,
+      spec_version: SPEC.version,
+      reviewed_at: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+      reviewer: null,
+      reviews: reviewEntries
+    });
+    const res = await fetch(SUBMIT.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Riview-Token": SUBMIT.token,
+      },
+      body: body,
+    });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error("HTTP " + res.status + (txt ? ": " + txt.slice(0, 200) : ""));
+    }
+    return res.json().catch(() => ({}));
+  }
+
+  let SUBMIT = { url: "", token: "" };
 
   function init() {
     renderCounts();
@@ -973,40 +1285,57 @@ __SUBMIT__
       URL.revokeObjectURL(a.href);
     });
 
-    const SUBMIT = JSON.parse(document.getElementById("submit-config").textContent);
+    SUBMIT = JSON.parse(document.getElementById("submit-config").textContent);
     const submitBtn = document.getElementById("submit-server-btn");
+    const submitAllBtn = document.getElementById("submit-all-btn");
     if (SUBMIT.url) {
+      // Reveal per-card submit buttons.
+      document.querySelectorAll('[data-role="card-submit"]').forEach(b => {
+        b.hidden = false;
+      });
+      submitAllBtn.hidden = false;
       submitBtn.hidden = false;
       submitBtn.addEventListener("click", async () => {
         submitBtn.disabled = true;
         copied.textContent = "Submitting...";
         try {
-          const res = await fetch(SUBMIT.url, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Riview-Token": SUBMIT.token,
-            },
-            body: output.value,
-          });
-          if (!res.ok) {
-            const txt = await res.text();
-            copied.textContent = "Submit failed (" + res.status + "): " + txt.slice(0, 200);
-          } else {
-            const data = await res.json().catch(() => ({}));
-            copied.textContent = "Submitted (rev " + (data.revision || "?") + ", status " + (data.status || "?") + ")";
-          }
+          const data = await postReviews(JSON.parse(output.value).reviews);
+          copied.textContent = "Submitted (rev " + (data.revision || "?") + ", status " + (data.status || "?") + ")";
         } catch (err) {
-          copied.textContent = "Submit error: " + err;
+          copied.textContent = "Submit error: " + (err && err.message ? err.message : err);
         } finally {
           submitBtn.disabled = false;
         }
       });
+
+      submitAllBtn.addEventListener("click", async () => {
+        const built = buildDelta();
+        if (!built.delta.reviews.length) return;
+        submitAllBtn.disabled = true;
+        try {
+          const data = await postReviews(built.delta.reviews);
+          flashBanner("Submitted " + built.delta.reviews.length + " review(s); server has " + (data.review_count || "?") + " for rev " + (data.revision || "?") + (built.dropped.length ? ". Dropped " + built.dropped.length + " incomplete." : "."));
+        } catch (err) {
+          flashBanner("Submit-all failed: " + (err && err.message ? err.message : err), true);
+          submitAllBtn.disabled = false;
+        }
+      });
+
+      subscribeToEvents();
     }
 
     document.getElementById("reset-btn").addEventListener("click", () => {
       if (!confirm("Clear all review inputs on this page?")) return;
       location.reload();
+    });
+
+    document.getElementById("banner-reload-btn").addEventListener("click", () => {
+      const reduced = matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (!reduced && document.startViewTransition) {
+        document.startViewTransition(() => location.reload());
+      } else {
+        location.reload();
+      }
     });
 
     document.getElementById("filter").addEventListener("input", (e) => {
@@ -1026,59 +1355,17 @@ __SUBMIT__
 """
 
 
-def resolve_paths(spec_dir: Path, basename: str, rev: int | None, latest: bool) -> tuple[Path, Path, int]:
-    """Return (md_path, json_path, rev_n). rev_n is 0 for base, N for revN."""
-    if rev is not None and rev < 0:
-        raise ValueError("--rev must be >= 0")
-    if rev is not None and latest:
-        raise ValueError("--rev and --latest are mutually exclusive")
-    base_md = spec_dir / f"{basename}.md"
-    base_json = spec_dir / f"{basename}.decisions.json"
-    if rev is None and not latest:
-        return base_md, base_json, 0
-    if rev is not None:
-        if rev == 0:
-            return base_md, base_json, 0
-        md = spec_dir / f"{basename}.rev{rev}.md"
-        js = spec_dir / f"{basename}.rev{rev}.decisions.json"
-        if not md.exists() or not js.exists():
-            raise FileNotFoundError(f"rev {rev} files for basename {basename!r} not found in {spec_dir}")
-        return md, js, rev
-    # --latest
-    rev_re = re.compile(rf"^{re.escape(basename)}\.rev(\d+)\.decisions\.json$")
-    latest_n = 0
-    for child in spec_dir.iterdir():
-        m = rev_re.match(child.name)
-        if m:
-            latest_n = max(latest_n, int(m.group(1)))
-    if latest_n == 0:
-        return base_md, base_json, 0
-    return (
-        spec_dir / f"{basename}.rev{latest_n}.md",
-        spec_dir / f"{basename}.rev{latest_n}.decisions.json",
-        latest_n,
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("spec_dir", type=Path, help="Folder containing <basename>.md and <basename>.decisions.json")
     parser.add_argument("--basename", default="spec",
                         help="Spec file basename (default: spec). Use 'mvp' to target mvp.md + mvp.decisions.json.")
-    parser.add_argument("--rev", type=int, default=None,
-                        help="Render a specific revision (<basename>.rev<N>.{md,decisions.json}). 0 means base.")
-    parser.add_argument("--latest", action="store_true",
-                        help="Render the highest existing revision (or base if no revs exist).")
     parser.add_argument("--output", "-o", type=Path, default=None,
-                        help="Output HTML path. Default: <spec-dir>/<basename>.html (base) or <basename>.rev<N>.html.")
+                        help="Output HTML path. Default: <spec-dir>/<basename>.html.")
     args = parser.parse_args(argv)
 
-    try:
-        md_path, json_path, rev_n = resolve_paths(args.spec_dir, args.basename, args.rev, args.latest)
-    except (ValueError, FileNotFoundError) as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-
+    md_path = args.spec_dir / f"{args.basename}.md"
+    json_path = args.spec_dir / f"{args.basename}.decisions.json"
     if not md_path.exists() or not json_path.exists():
         print(f"missing {md_path.name} or {json_path.name} in {args.spec_dir}", file=sys.stderr)
         return 2
@@ -1095,15 +1382,9 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     html_out = build_html(spec, bodies)
-    if args.output:
-        out_path = args.output
-    else:
-        out_path = args.spec_dir / (
-            f"{args.basename}.rev{rev_n}.html" if rev_n else f"{args.basename}.html"
-        )
+    out_path = args.output or args.spec_dir / f"{args.basename}.html"
     out_path.write_text(html_out)
-    rev_label = f"rev{rev_n}" if rev_n else "base"
-    print(f"wrote {out_path} ({len(html_out)} bytes, {len(spec['nodes'])} nodes, {rev_label})")
+    print(f"wrote {out_path} ({len(html_out)} bytes, {len(spec['nodes'])} nodes, v{spec['version']})")
     return 0
 
 

@@ -25,6 +25,11 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -40,6 +45,7 @@ except ImportError:
 # render.py lives next to this file; import it without depending on packaging.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render  # noqa: E402
+import apply as apply_mod  # noqa: E402
 
 DEFAULT_PORT = 7891  # daemon listens here; CLI uses it to print URLs.
 MAX_REVIEW_BYTES = 1 * 1024 * 1024  # 1 MiB cap on /review POST bodies.
@@ -92,6 +98,17 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        # fsync the parent dir so the rename itself survives a crash, not just
+        # the file contents. Best-effort; skip silently on platforms (e.g.
+        # Windows) where directory fsync is unsupported.
+        try:
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
     except Exception:
         try:
             os.unlink(tmp)
@@ -173,6 +190,27 @@ def ensure_token() -> str:
 
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# Per-session Condition objects, lazily created. Writers call _notify_session
+# after persisting changes; long-poll / SSE readers wait on the matching
+# Condition. The dict itself is guarded by _session_events_lock.
+_session_events_lock = threading.Lock()
+_session_events: dict[str, threading.Condition] = {}
+
+
+def _session_event(sid: str) -> threading.Condition:
+    with _session_events_lock:
+        cond = _session_events.get(sid)
+        if cond is None:
+            cond = threading.Condition()
+            _session_events[sid] = cond
+        return cond
+
+
+def _notify_session(sid: str) -> None:
+    cond = _session_event(sid)
+    with cond:
+        cond.notify_all()
 
 
 def read_spec(dir_: Path, basename: str):
@@ -308,6 +346,7 @@ def cmd_submit(args) -> int:
                     "session_id": sid,
                     "revision": cur,
                     "status": meta["status"],
+                    "event_seq": int(meta.get("event_seq", 0)),
                     "idempotent": True,
                     "url": session_url(sid),
                 })
@@ -333,10 +372,12 @@ def cmd_submit(args) -> int:
         with session_write_lock(sid):
             _write_revision(sid, new_rev, md_bytes, json_bytes, md_hash, json_hash, meta)
 
+    final_meta = load_meta(sid)
     _emit({
         "session_id": sid,
         "revision": new_rev,
         "status": "awaiting_review",
+        "event_seq": int(final_meta.get("event_seq", 0)),
         "url": session_url(sid),
     })
     return 0
@@ -364,7 +405,9 @@ def _write_revision(
         "json_hash": json_hash,
         "submitted_at": now_iso(),
     }
+    meta["event_seq"] = int(meta.get("event_seq", 0)) + 1
     save_meta(sid, meta)
+    _notify_session(sid)
 
 
 class ReviewError(Exception):
@@ -376,11 +419,33 @@ class ReviewError(Exception):
         self.http_status = http_status
 
 
+def _merge_reviews_by_node_id(
+    existing: list[dict], incoming: list[dict]
+) -> list[dict]:
+    """Upsert incoming entries into existing by node_id; sort by node_id.
+
+    Later entries (incoming) win on conflict. Order within the result is
+    deterministic (sorted by node_id) so concurrent writers converge.
+    """
+    by_id: dict[str, dict] = {}
+    for entry in existing:
+        if isinstance(entry, dict) and isinstance(entry.get("node_id"), str):
+            by_id[entry["node_id"]] = entry
+    for entry in incoming:
+        by_id[entry["node_id"]] = entry
+    return sorted(by_id.values(), key=lambda e: e["node_id"])
+
+
 def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
     """Validate + persist a review for a session's current revision.
 
     Shared by `submit-review` CLI and the HTTP POST endpoint. Holds the
     per-session write lock around the meta update.
+
+    On repeated POSTs against the same revision, `reviews[]` is merged by
+    `node_id` (upsert: later entries win) so per-card and batch submits can
+    coexist without one stomping the other. Other top-level fields take the
+    latest POST's values.
 
     Raises ReviewError on bad input. Returns the emit-ready payload on success.
     """
@@ -390,6 +455,20 @@ def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
         raise ReviewError(f"invalid JSON: {e}", http_status=400)
     if not isinstance(review, dict):
         raise ReviewError("review must be a JSON object", http_status=400)
+    incoming_reviews = review.get("reviews")
+    if not isinstance(incoming_reviews, list):
+        raise ReviewError("review.reviews must be a list", http_status=400)
+    for i, entry in enumerate(incoming_reviews):
+        if not isinstance(entry, dict):
+            raise ReviewError(
+                f"review.reviews[{i}] must be an object", http_status=400
+            )
+        nid = entry.get("node_id")
+        if not isinstance(nid, str) or not nid:
+            raise ReviewError(
+                f"review.reviews[{i}].node_id must be a non-empty string",
+                http_status=400,
+            )
 
     with session_write_lock(sid):
         meta = load_meta(sid)  # raises SessionNotFound, handled at call sites
@@ -413,16 +492,63 @@ def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
                 f"{cur_sidecar.get('version')!r}",
                 http_status=409,
             )
+
+        # Reject unknown node_ids up-front (would fail apply.py later anyway).
+        known_node_ids = {
+            n["id"] for n in cur_sidecar.get("nodes") or [] if isinstance(n, dict) and isinstance(n.get("id"), str)
+        }
+        unknown = [
+            entry["node_id"] for entry in incoming_reviews
+            if entry["node_id"] not in known_node_ids
+        ]
+        if unknown:
+            raise ReviewError(
+                f"unknown node_id(s) for rev {cur}: {sorted(set(unknown))}",
+                http_status=409,
+            )
+
+        # Drop entries whose only field is node_id — they would silently clobber
+        # a prior real review for the same node on merge. Schema rule: "Entries
+        # with all fields null/empty are dropped silently."
+        filtered_incoming = [
+            entry for entry in incoming_reviews if not apply_mod.is_empty_entry(entry)
+        ]
+
         rev_dir = session_dir(sid) / "reviews" / str(cur)
         rev_dir.mkdir(parents=True, exist_ok=True)
-        atomic_write_bytes(rev_dir / "review.json", review_bytes)
+        review_path = rev_dir / "review.json"
+
+        existing_reviews: list[dict] = []
+        if review_path.exists():
+            try:
+                existing = json.loads(review_path.read_text("utf-8"))
+                if isinstance(existing, dict) and isinstance(
+                    existing.get("reviews"), list
+                ):
+                    existing_reviews = existing["reviews"]
+            except json.JSONDecodeError:
+                # Corrupted prior file shouldn't block a clean overwrite.
+                existing_reviews = []
+
+        merged = dict(review)
+        merged["reviews"] = _merge_reviews_by_node_id(
+            existing_reviews, filtered_incoming
+        )
+        merged_bytes = (json.dumps(merged, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8"
+        )
+        atomic_write_bytes(review_path, merged_bytes)
         atomic_write_text(rev_dir / "submitted_at", now_iso() + "\n")
         meta["status"] = "review_submitted"
+        meta["event_seq"] = int(meta.get("event_seq", 0)) + 1
         save_meta(sid, meta)
+        _notify_session(sid)
         return {
             "session_id": sid,
             "revision": cur,
             "status": "review_submitted",
+            "event_seq": meta["event_seq"],
+            "review_count": len(merged["reviews"]),
         }
 
 
@@ -626,6 +752,24 @@ def _render_invalid_session_html(sid: str, errors: list[str]) -> str:
     )
 
 
+def _session_event_snapshot(sid: str) -> dict:
+    """Cheap read-only view of session state for /wait + /events emitters."""
+    meta = load_meta(sid)
+    cur = int(meta.get("current_revision", 0))
+    has_review = False
+    if cur > 0:
+        has_review = (
+            session_dir(sid) / "reviews" / str(cur) / "review.json"
+        ).exists()
+    return {
+        "session_id": sid,
+        "event_seq": int(meta.get("event_seq", 0)),
+        "revision": cur,
+        "status": meta.get("status"),
+        "has_review": has_review,
+    }
+
+
 class RIViewHandler(BaseHTTPRequestHandler):
     server_version = "RIView/1.0"
 
@@ -652,7 +796,8 @@ class RIViewHandler(BaseHTTPRequestHandler):
         self._write(status, body.encode("utf-8"), "text/html; charset=utf-8")
 
     def do_GET(self):  # noqa: N802
-        path = urlsplit(self.path).path
+        parts = urlsplit(self.path)
+        path = parts.path
         if path == "/" or path == "/index.html":
             rows = _list_session_rows(include_closed=False)
             self._html(HTTPStatus.OK, _render_index_html(rows))
@@ -672,7 +817,88 @@ class RIViewHandler(BaseHTTPRequestHandler):
             status, html_body = _render_session_html(sid, meta, token)
             self._html(status, html_body)
             return
+        m = re.fullmatch(r"/sessions/([0-9a-f]{12})/wait", path)
+        if m:
+            self._handle_wait(m.group(1), parts.query)
+            return
+        m = re.fullmatch(r"/sessions/([0-9a-f]{12})/events", path)
+        if m:
+            self._handle_events(m.group(1))
+            return
         self._text(HTTPStatus.NOT_FOUND, "not found")
+
+    def _handle_wait(self, sid: str, query: str) -> None:
+        try:
+            resolve_session(sid)
+        except CommandError as e:
+            self._text(
+                HTTPStatus.NOT_FOUND if e.code == 3 else HTTPStatus.BAD_REQUEST,
+                f"session {sid}: {'not found' if e.code == 3 else 'invalid id'}",
+            )
+            return
+        qs = urllib.parse.parse_qs(query)
+        try:
+            since = int(qs.get("since", ["0"])[0])
+        except ValueError:
+            self._text(HTTPStatus.BAD_REQUEST, "since must be an integer")
+            return
+        try:
+            timeout = float(qs.get("timeout", ["25"])[0])
+        except ValueError:
+            self._text(HTTPStatus.BAD_REQUEST, "timeout must be a number")
+            return
+        timeout = max(0.1, min(timeout, 60.0))
+        cond = _session_event(sid)
+        deadline = time.monotonic() + timeout
+        with cond:
+            snapshot = _session_event_snapshot(sid)
+            while snapshot["event_seq"] <= since:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                cond.wait(timeout=remaining)
+                snapshot = _session_event_snapshot(sid)
+        if snapshot["event_seq"] > since:
+            self._json(HTTPStatus.OK, snapshot)
+            return
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def _handle_events(self, sid: str) -> None:
+        try:
+            resolve_session(sid)
+        except CommandError as e:
+            self._text(
+                HTTPStatus.NOT_FOUND if e.code == 3 else HTTPStatus.BAD_REQUEST,
+                f"session {sid}: {'not found' if e.code == 3 else 'invalid id'}",
+            )
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        # Defeat reverse-proxy buffering (nginx) when someone fronts the daemon.
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        cond = _session_event(sid)
+        last_seq = -1
+        try:
+            while True:
+                with cond:
+                    snapshot = _session_event_snapshot(sid)
+                    if snapshot["event_seq"] <= last_seq:
+                        cond.wait(timeout=15.0)
+                        snapshot = _session_event_snapshot(sid)
+                if snapshot["event_seq"] > last_seq:
+                    payload = json.dumps(snapshot)
+                    # Default (unnamed) event so EventSource.onmessage fires.
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    last_seq = snapshot["event_seq"]
+                else:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def do_POST(self):  # noqa: N802
         path = urlsplit(self.path).path
@@ -752,6 +978,63 @@ def _emit(obj) -> None:
     sys.stdout.write(json.dumps(obj) + "\n")
 
 
+def cmd_wait(args) -> int:
+    """Block until the daemon reports a session event past `--since`.
+
+    Designed for agents driving background work: launch this in a backgrounded
+    Bash, sleep on its output (the harness wakes you when it exits), then call
+    `pull` to read the new review.
+
+    Default behavior is "wait for the next event from now" — the CLI reads
+    the current event_seq from meta and uses it as the baseline. Pass an
+    explicit `--since N` to wait for events past a specific sequence number.
+    """
+    meta = resolve_session(args.session)  # 404/2 on bad input
+    base_url = args.url.rstrip("/")
+    overall_deadline = (
+        time.monotonic() + args.timeout if args.timeout > 0 else None
+    )
+    since = (
+        args.since if args.since is not None else int(meta.get("event_seq", 0))
+    )
+    while True:
+        per_request_timeout = 25.0
+        if overall_deadline is not None:
+            r = overall_deadline - time.monotonic()
+            if r <= 0:
+                sys.stderr.write(
+                    f"timed out waiting for session {args.session}\n"
+                )
+                return 5
+            per_request_timeout = min(per_request_timeout, r)
+        q = urllib.parse.urlencode(
+            {"since": since, "timeout": per_request_timeout}
+        )
+        url = f"{base_url}/sessions/{args.session}/wait?{q}"
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(
+                req, timeout=per_request_timeout + 10
+            ) as resp:
+                if resp.status == 204:
+                    continue  # daemon timed out; loop and re-poll
+                body = resp.read().decode("utf-8")
+                payload = json.loads(body)
+                _emit(payload)
+                return 0
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace").strip()
+            sys.stderr.write(
+                f"error: daemon returned {e.code}: {detail}\n"
+            )
+            return 5
+        except (urllib.error.URLError, ConnectionError, OSError) as e:
+            sys.stderr.write(
+                f"error: cannot reach daemon at {base_url}: {e}\n"
+            )
+            return 5
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="riview",
@@ -814,6 +1097,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("session", help="Session ID.")
     s.set_defaults(func=cmd_open)
+
+    s = sub.add_parser(
+        "wait",
+        help="Block until a new review/revision lands on a session (long-poll against the daemon).",
+    )
+    s.add_argument("session", help="Session ID.")
+    s.add_argument(
+        "--since",
+        type=int,
+        default=None,
+        help="Event sequence to wait past. Default: current event_seq from meta "
+             "(i.e. wait for the next change from now).",
+    )
+    s.add_argument(
+        "--timeout",
+        type=float,
+        default=0.0,
+        help="Overall timeout in seconds (0 = no limit; reconnect to the daemon as needed).",
+    )
+    s.add_argument(
+        "--url",
+        default=f"http://127.0.0.1:{DEFAULT_PORT}",
+        help=f"Daemon base URL (default http://127.0.0.1:{DEFAULT_PORT}).",
+    )
+    s.set_defaults(func=cmd_wait)
 
     s = sub.add_parser(
         "daemon",

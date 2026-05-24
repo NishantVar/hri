@@ -5,9 +5,9 @@ The data model for interactive spec/plan review. Two files form one logical spec
 - `<basename>.md` — human-readable markdown narrative.
 - `<basename>.decisions.json` — structured graph of nodes (decisions, ambiguities, risks) keyed by stable IDs.
 
-The default basename is `spec`; pass `--basename mvp` to render/apply scripts to point at `mvp.md` + `mvp.decisions.json` (and `mvp.rev<N>.*` for revisions). Multiple basenames can coexist in the same directory — rev discovery is basename-scoped.
+The default basename is `spec`; pass `--basename mvp` to render/apply scripts to point at `mvp.md` + `mvp.decisions.json`. Multiple basenames can coexist in the same directory.
 
-The applier produces `<basename>.rev<N>.md` and `<basename>.rev<N>.decisions.json` after each review pass; it never mutates originals in place.
+The applier overwrites `<basename>.md` and `<basename>.decisions.json` in place after each review pass (atomic write: tempfile → fsync → rename, plus a best-effort parent-directory fsync). Each pass bumps `version` and refreshes the `applied_from_review` audit block. Git is the history. Each file is crash-hardened individually; applying a review is not a transaction across the two files, so a crash between them can leave the sidecar bumped while the markdown still reflects the prior version. Re-run `apply.py` against the same review delta to recover.
 
 ## Markdown anchor convention
 
@@ -27,10 +27,10 @@ IDs must be unique within the spec and stable across revisions. Convention: `<ki
 {
   "spec_id": "string",                 // stable across revisions
   "spec_title": "string",
-  "source_path": "<basename>.md",      // relative to this file; "<basename>.rev<N>.md" in rev sidecars
-  "version": 1,                        // bumped by the applier on each rev
+  "source_path": "<basename>.md",      // relative to this file; always points at the sibling .md
+  "version": 1,                        // bumped by the applier on each pass
   "generated_at": "ISO-8601",
-  "applied_from_review": null,         // set on rev files; see "Rev metadata"
+  "applied_from_review": null,         // set after the first apply pass; see "Apply metadata"
   "nodes": [ { ... }, ... ]
 }
 ```
@@ -134,14 +134,14 @@ Rules (the applier rejects the whole delta if any of these fail, listing every f
 - Entries with all fields null/empty are dropped silently (counted as `empty_entries_skipped`).
 - `reviews` is sorted by `node_id` in the renderer's export to make diffs deterministic.
 
-## Rev metadata
+## Apply metadata
 
-When the applier produces a rev, it sets:
+After each apply pass, `decisions.json` carries:
 
 ```jsonc
 {
   "version": <prev + 1>,
-  "source_path": "<basename>.rev<N>.md",
+  "source_path": "<basename>.md",
   "applied_from_review": {
     "review_path": "review-...json",
     "reviewed_at": "...",
@@ -153,11 +153,11 @@ When the applier produces a rev, it sets:
 }
 ```
 
-Each touched node gets its `review` field updated as shown above. Untouched nodes are copied through unchanged.
+Each touched node gets its `review` field updated as shown above. Untouched nodes are left as-is. Only the latest `review` per node is preserved on disk; earlier reviews live in git history.
 
 ## Determinism
 
-- Node order in `nodes[]` is preserved across revs.
+- Node order in `nodes[]` is preserved across passes.
 - `reviews[]` in the delta is sorted by `node_id`.
 - Anchor blocks in `<basename>.md` are rewritten without touching surrounding whitespace.
 - `generated_at` and `reviewed_at` are the only fields expected to change between equivalent runs.
