@@ -96,7 +96,7 @@ Each rev sidecar records `applied_from_review.review_path` and `applied_from_rev
 - No multi-user merge — one reviewer at a time.
 - No freeform ink/handwriting capture.
 - No automated source-spec re-generation; the applier mutates the structured graph + body anchors but doesn't re-run the authoring agent.
-- The renderer doesn't yet display past `review` blocks (only fresh review forms). Re-reviewing a rev shows fresh-form UI; prior comments live in the JSON.
+- Only the most recent `review` per node is preserved across revs. `apply.py` overwrites `node.review` each pass; older review history lives in the prior rev files. A `review_history[]` extension would be a schema-level addition.
 
 ## Files
 

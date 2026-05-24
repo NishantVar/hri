@@ -327,6 +327,38 @@ TEMPLATE = r"""<!doctype html>
     cursor: pointer;
     color: var(--muted);
   }
+  details.prior-review {
+    margin-top: 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--card-alt, var(--bg));
+    font-size: 13px;
+  }
+  details.prior-review > summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+  }
+  details.prior-review[open] > summary { margin-bottom: 6px; }
+  .prior-review .pr-row {
+    margin: 4px 0;
+    color: var(--muted);
+  }
+  .prior-review .pr-row strong { color: var(--fg); font-weight: 500; }
+  .prior-review .pr-transition .arrow { margin: 0 6px; color: var(--muted); }
+  .prior-review .pr-comment {
+    margin-top: 6px;
+    padding: 6px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    white-space: pre-wrap;
+    color: var(--fg);
+  }
   .review {
     border-top: 1px dashed var(--border);
     margin-top: 14px;
@@ -626,6 +658,51 @@ __PAYLOAD__
       p.className = "meta-row";
       p.innerHTML = `<strong>Prompt:</strong> ${escapeHtml(node.prompt)}`;
       card.appendChild(p);
+    }
+
+    // Prior review (set by apply.py when this node was reviewed in a previous pass)
+    if (node.review && typeof node.review === "object") {
+      const r = node.review;
+      const rows = [];
+      const before = r.status_before, after = r.status_after;
+      if (before || after) {
+        const sameStatus = before === after;
+        rows.push(`<div class="pr-row pr-transition"><strong>Status:</strong> ` + (
+          sameStatus
+            ? `<span class="badge status status-${escapeHtml(after || before)}">${escapeHtml(after || before)}</span> <span class="arrow">(unchanged)</span>`
+            : `<span class="badge status status-${escapeHtml(before)}">${escapeHtml(before)}</span><span class="arrow">→</span><span class="badge status status-${escapeHtml(after)}">${escapeHtml(after)}</span>`
+        ) + `</div>`);
+      }
+      if (r.resolution && typeof r.resolution === "object") {
+        const choice = r.resolution.choice_id;
+        const free = r.resolution.freeform;
+        const by = r.resolution.by;
+        let resTxt = "";
+        if (choice) resTxt = `choice: <code>${escapeHtml(choice)}</code>`;
+        else if (free) resTxt = `freeform: ${escapeHtml(free)}`;
+        if (by) resTxt += ` <span class="arrow">(by ${escapeHtml(by)})</span>`;
+        if (resTxt) rows.push(`<div class="pr-row"><strong>Resolution:</strong> ${resTxt}</div>`);
+      }
+      if (r.body_edited) {
+        rows.push(`<div class="pr-row"><strong>Body:</strong> edited in this revision</div>`);
+      }
+      const sourceBits = [];
+      if (r.review_source) sourceBits.push(escapeHtml(r.review_source));
+      if (r.reviewed_at) sourceBits.push(escapeHtml(r.reviewed_at));
+      if (sourceBits.length) {
+        rows.push(`<div class="pr-row"><strong>Source:</strong> ${sourceBits.join(" · ")}</div>`);
+      }
+      const commentBlock = (r.comment && String(r.comment).trim())
+        ? `<div class="pr-comment">${escapeHtml(r.comment)}</div>`
+        : "";
+      const det = document.createElement("details");
+      det.className = "prior-review";
+      det.open = false;
+      const summaryLabel = r.comment && String(r.comment).trim()
+        ? "Previous review (with comment)"
+        : "Previous review";
+      det.innerHTML = `<summary>${summaryLabel}</summary>${rows.join("")}${commentBlock}`;
+      card.appendChild(det);
     }
 
     // Review form
