@@ -1,0 +1,21 @@
+{
+  "spec_id": "pomodoro-mvp",
+  "spec_version": 2,
+  "reviewed_at": "2026-05-23T20:00:00Z",
+  "reviewer": "nishant",
+  "reviews": [
+    {
+      "node_id": "risk-watch",
+      "new_status": "dismissed",
+      "comment": "Position v1 as iPhone-first in store copy. Done."
+    },
+    {
+      "node_id": "amb-streaks",
+      "new_status": "resolved",
+      "resolution": {
+        "freeform": "Defer to v1.1 — track as a known limitation in the launch notes, revisit after 4 weeks of usage data."
+      },
+      "comment": "Cleaner than the binary option."
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "spec_id": "pomodoro-mvp",
+  "spec_version": 1,
+  "reviewed_at": "2026-05-23T19:30:00Z",
+  "reviewer": "nishant",
+  "reviews": [
+    {
+      "node_id": "amb-streaks",
+      "new_status": "deferred",
+      "comment": "Stretch goal. Ship core loop first."
+    },
+    {
+      "node_id": "amb-sync",
+      "new_status": "resolved",
+      "resolution": { "choice_id": "local" },
+      "comment": "Local-only for v1. Revisit in v2 if users ask."
+    },
+    {
+      "node_id": "deci-notify",
+      "new_status": "confirmed",
+      "comment": "Agreed — keep it simple."
+    },
+    {
+      "node_id": "deci-platform",
+      "new_status": "confirmed",
+      "body_edit": "**Platform: iOS-only for v1.**\n\nShip to iOS using SwiftUI on iOS 17+. Android, web, and macOS are explicitly out of scope until usage justifies the cost. Reviewed and confirmed 2026-05-23.",
+      "comment": "Locked in."
+    },
+    {
+      "node_id": "risk-bg",
+      "new_status": "mitigated"
+    },
+    {
+      "node_id": "risk-watch",
+      "comment": "Accept the gap for v1. Mention in store copy."
+    }
+  ]
+}

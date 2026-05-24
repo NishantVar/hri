@@ -1,0 +1,116 @@
+{
+  "spec_id": "pomodoro-mvp",
+  "spec_title": "Pomodoro Timer MVP",
+  "source_path": "spec.md",
+  "version": 1,
+  "generated_at": "2026-05-23T18:00:00Z",
+  "applied_from_review": null,
+  "nodes": [
+    {
+      "id": "deci-platform",
+      "kind": "decision",
+      "title": "Platform: iOS-only for v1",
+      "status": "ai-confident",
+      "confidence": "high",
+      "depends_on": [],
+      "source_anchor": "deci-platform",
+      "rationale": "Solo dev, fastest path to ship, smallest surface area to maintain.",
+      "alternatives": [
+        "iOS + Android via React Native",
+        "Web-only PWA"
+      ],
+      "review": null
+    },
+    {
+      "id": "amb-sync",
+      "kind": "ambiguity",
+      "title": "Sync model: CloudKit vs custom backend vs local-only",
+      "status": "open",
+      "confidence": "low",
+      "depends_on": ["deci-platform"],
+      "source_anchor": "amb-sync",
+      "prompt": "How should sessions sync across devices?",
+      "options": [
+        {
+          "id": "cloudkit",
+          "label": "CloudKit",
+          "body": "Free, Apple-only, zero backend ops. Locks in iOS-only forever."
+        },
+        {
+          "id": "custom",
+          "label": "Custom backend",
+          "body": "More work now, but keeps the door open to Android/web later."
+        },
+        {
+          "id": "local",
+          "label": "Local-only (defer)",
+          "body": "Ship without sync. Revisit in v2 once we know whether users care."
+        }
+      ],
+      "resolution": null,
+      "review": null
+    },
+    {
+      "id": "deci-notify",
+      "kind": "decision",
+      "title": "Notifications: local-only",
+      "status": "ai-confident",
+      "confidence": "high",
+      "depends_on": [],
+      "source_anchor": "deci-notify",
+      "rationale": "No backend means no push infrastructure. Local notifications cover the v1 use case (end-of-session alert).",
+      "alternatives": [
+        "APNs push (requires backend)"
+      ],
+      "review": null
+    },
+    {
+      "id": "risk-bg",
+      "kind": "risk",
+      "title": "iOS background timer limits",
+      "status": "open",
+      "severity": "high",
+      "confidence": "high",
+      "depends_on": [],
+      "source_anchor": "risk-bg",
+      "mitigation": "Schedule a local notification at the deadline so the user is notified even if the in-app timer is killed by the OS.",
+      "review": null
+    },
+    {
+      "id": "risk-watch",
+      "kind": "risk",
+      "title": "Apple Watch parity expectation",
+      "status": "open",
+      "severity": "medium",
+      "confidence": "medium",
+      "depends_on": ["deci-platform"],
+      "source_anchor": "risk-watch",
+      "mitigation": "TBD. Could position v1 as iPhone-first explicitly in store copy, or accept the gap.",
+      "review": null
+    },
+    {
+      "id": "amb-streaks",
+      "kind": "ambiguity",
+      "title": "Streaks: first-class for v1 or stretch goal?",
+      "status": "open",
+      "confidence": "low",
+      "depends_on": [],
+      "source_anchor": "amb-streaks",
+      "prompt": "Should streaks ship in v1 or be deferred?",
+      "options": [
+        {
+          "id": "first-class",
+          "label": "First-class for v1",
+          "body": "Strong retention hook. Adds per-day session tracking, gap handling, recovery UI."
+        },
+        {
+          "id": "stretch",
+          "label": "Stretch goal",
+          "body": "Ship without; revisit if engagement metrics suggest it would help."
+        }
+      ],
+      "resolution": null,
+      "review": null
+    }
+  ]
+}
