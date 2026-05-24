@@ -91,9 +91,10 @@ agents working in parallel need a shared place to drop reviews into. The
 (`revisions/N/source.md` + `decisions.json`) and revisioned review history
 (`reviews/N/review.json`).
 
-This README documents **slice 1a** — the on-disk model and the agent-facing CLI.
-The HTTP daemon that exposes a browser UI on `http://127.0.0.1:7891/` lands in
-slice 1b; the CLI works standalone without it.
+This README documents the on-disk model, the agent-facing CLI, and the
+localhost HTTP daemon that exposes a browser UI on
+`http://127.0.0.1:7891/`. The CLI works standalone if you don't want to run
+the daemon.
 
 ### Layout
 
@@ -154,10 +155,38 @@ python3 riview/scripts/riview.py dismiss <id>
 
 Exit codes: `0` ok, `2` bad input, `3` session not found, `4` no review for current revision.
 
-Smoke tests live at `riview/tests/test_session.py`:
+### Daemon
+
+A small HTTP daemon serves a browser review UI and accepts review POSTs:
 
 ```bash
-python3 -m unittest riview.tests.test_session
+python3 riview/scripts/riview.py daemon                    # 127.0.0.1:7891
+python3 riview/scripts/riview.py daemon --port 7900        # custom port
+```
+
+Routes:
+
+- `GET /` — index page listing open sessions across all projects.
+- `GET /sessions/<id>` — per-session review UI (the existing `render.py` HTML,
+  with a "Submit to RIView server" button wired up).
+- `POST /sessions/<id>/review` — accept a review JSON for the session's
+  current revision. Requires header `X-Riview-Token: <token>`.
+
+The token is generated on first daemon start at `~/.riview/token` (mode 0600)
+and is read by the daemon to mint same-origin POSTs from the rendered review
+page. The cross-origin POST path is implicitly blocked by browser preflight
+on the custom header. Body size is capped at 1 MiB.
+
+Locking: writes (CLI + daemon) take an exclusive flock on
+`~/.riview/sessions/<id>/.lock` so concurrent agents can't race on revision
+increments or stomp each other's meta updates. On non-POSIX platforms the
+lock is a no-op; the daemon is intended for single-user, low-contention use.
+
+Smoke tests:
+
+```bash
+python3 -m unittest riview.tests.test_session   # CLI / session model
+python3 -m unittest riview.tests.test_daemon    # HTTP daemon end-to-end
 ```
 
 ## Design choices

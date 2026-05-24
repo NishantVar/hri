@@ -18,17 +18,31 @@ Exit codes:
 
 import argparse
 import hashlib
+import html as html_lib
 import json
 import os
 import re
 import secrets
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
+try:
+    import fcntl  # POSIX only; daemon + CLI locking degrade to no-op elsewhere.
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
 
-DEFAULT_PORT = 7891  # daemon will listen here in slice 1b; CLI uses it to print URLs.
+# render.py lives next to this file; import it without depending on packaging.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import render  # noqa: E402
+
+DEFAULT_PORT = 7891  # daemon listens here; CLI uses it to print URLs.
+MAX_REVIEW_BYTES = 1 * 1024 * 1024  # 1 MiB cap on /review POST bodies.
 
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
@@ -108,6 +122,46 @@ def save_meta(sid: str, meta: dict) -> None:
     atomic_write_text(session_dir(sid) / "meta.json", body)
 
 
+@contextmanager
+def session_write_lock(sid: str):
+    """Serialise concurrent writers (CLI + daemon) on a per-session lock file.
+
+    Atomic writes already protect readers from torn files. The lock prevents
+    two writers from racing on `current_revision` increments or stomping each
+    other's meta updates.
+    """
+    sd = session_dir(sid)
+    sd.mkdir(parents=True, exist_ok=True)
+    lock_path = sd / ".lock"
+    if fcntl is None:
+        # Non-POSIX fallback: skip locking. Single-user, low contention.
+        yield
+        return
+    with open(lock_path, "w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def token_path() -> Path:
+    return riview_home() / "token"
+
+
+def ensure_token() -> str:
+    """Read ~/.riview/token, creating it with 0o600 perms on first call."""
+    p = token_path()
+    if p.exists():
+        return p.read_text("utf-8").strip()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(24)
+    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token + "\n")
+    return token
+
+
 def read_spec(dir_: Path, basename: str):
     md_path = dir_ / f"{basename}.md"
     json_path = dir_ / f"{basename}.decisions.json"
@@ -165,39 +219,41 @@ def cmd_submit(args) -> int:
     json_hash = sha256_hex(json_bytes)
 
     if args.session is not None:
-        meta = resolve_session(args.session)
+        # Validate the id first so a bad input fails fast without taking a lock.
+        resolve_session(args.session)
         sid = args.session
-        # Cross-spec contamination guards: an existing session is pinned to a
-        # specific (basename, spec_id). Reject mismatched submits.
-        if args.basename != meta.get("basename"):
-            sys.stderr.write(
-                f"error: session {sid} is for basename {meta.get('basename')!r}, "
-                f"not {args.basename!r}\n"
-            )
-            return 2
-        incoming_spec_id = sidecar.get("spec_id")
-        if incoming_spec_id != meta.get("spec_id"):
-            sys.stderr.write(
-                f"error: session {sid} is for spec_id {meta.get('spec_id')!r}, "
-                f"not {incoming_spec_id!r}\n"
-            )
-            return 2
-        cur = meta.get("current_revision", 0)
-        cur_hashes = meta.get("revisions", {}).get(str(cur), {})
-        if (
-            cur
-            and cur_hashes.get("md_hash") == md_hash
-            and cur_hashes.get("json_hash") == json_hash
-        ):
-            _emit({
-                "session_id": sid,
-                "revision": cur,
-                "status": meta["status"],
-                "idempotent": True,
-                "url": session_url(sid),
-            })
-            return 0
-        new_rev = cur + 1
+        with session_write_lock(sid):
+            meta = load_meta(sid)
+            if args.basename != meta.get("basename"):
+                sys.stderr.write(
+                    f"error: session {sid} is for basename {meta.get('basename')!r}, "
+                    f"not {args.basename!r}\n"
+                )
+                return 2
+            incoming_spec_id = sidecar.get("spec_id")
+            if incoming_spec_id != meta.get("spec_id"):
+                sys.stderr.write(
+                    f"error: session {sid} is for spec_id {meta.get('spec_id')!r}, "
+                    f"not {incoming_spec_id!r}\n"
+                )
+                return 2
+            cur = meta.get("current_revision", 0)
+            cur_hashes = meta.get("revisions", {}).get(str(cur), {})
+            if (
+                cur
+                and cur_hashes.get("md_hash") == md_hash
+                and cur_hashes.get("json_hash") == json_hash
+            ):
+                _emit({
+                    "session_id": sid,
+                    "revision": cur,
+                    "status": meta["status"],
+                    "idempotent": True,
+                    "url": session_url(sid),
+                })
+                return 0
+            new_rev = cur + 1
+            _write_revision(sid, new_rev, md_bytes, json_bytes, md_hash, json_hash, meta)
     else:
         sid = new_session_id()
         meta = {
@@ -214,21 +270,8 @@ def cmd_submit(args) -> int:
             "revisions": {},
         }
         new_rev = 1
-
-    rev_dir = session_dir(sid) / "revisions" / str(new_rev)
-    rev_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(rev_dir / "source.md", md_bytes)
-    atomic_write_bytes(rev_dir / "decisions.json", json_bytes)
-    atomic_write_text(rev_dir / "submitted_at", now_iso() + "\n")
-
-    meta["current_revision"] = new_rev
-    meta["status"] = "awaiting_review"
-    meta.setdefault("revisions", {})[str(new_rev)] = {
-        "md_hash": md_hash,
-        "json_hash": json_hash,
-        "submitted_at": now_iso(),
-    }
-    save_meta(sid, meta)
+        with session_write_lock(sid):
+            _write_revision(sid, new_rev, md_bytes, json_bytes, md_hash, json_hash, meta)
 
     _emit({
         "session_id": sid,
@@ -239,51 +282,103 @@ def cmd_submit(args) -> int:
     return 0
 
 
+def _write_revision(
+    sid: str,
+    new_rev: int,
+    md_bytes: bytes,
+    json_bytes: bytes,
+    md_hash: str,
+    json_hash: str,
+    meta: dict,
+) -> None:
+    """Persist a new revision and update meta. Caller holds session_write_lock."""
+    rev_dir = session_dir(sid) / "revisions" / str(new_rev)
+    rev_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(rev_dir / "source.md", md_bytes)
+    atomic_write_bytes(rev_dir / "decisions.json", json_bytes)
+    atomic_write_text(rev_dir / "submitted_at", now_iso() + "\n")
+    meta["current_revision"] = new_rev
+    meta["status"] = "awaiting_review"
+    meta.setdefault("revisions", {})[str(new_rev)] = {
+        "md_hash": md_hash,
+        "json_hash": json_hash,
+        "submitted_at": now_iso(),
+    }
+    save_meta(sid, meta)
+
+
+class ReviewError(Exception):
+    """Raised by record_review_for_session for any validation/write failure."""
+
+    def __init__(self, message: str, http_status: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.http_status = http_status
+
+
+def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
+    """Validate + persist a review for a session's current revision.
+
+    Shared by `submit-review` CLI and the HTTP POST endpoint. Holds the
+    per-session write lock around the meta update.
+
+    Raises ReviewError on bad input. Returns the emit-ready payload on success.
+    """
+    try:
+        review = json.loads(review_bytes)
+    except json.JSONDecodeError as e:
+        raise ReviewError(f"invalid JSON: {e}", http_status=400)
+    if not isinstance(review, dict):
+        raise ReviewError("review must be a JSON object", http_status=400)
+
+    with session_write_lock(sid):
+        meta = load_meta(sid)  # raises SessionNotFound, handled at call sites
+        cur = meta["current_revision"]
+        if cur < 1:
+            raise ReviewError(f"session {sid} has no revisions yet", http_status=409)
+        if review.get("spec_id") != meta.get("spec_id"):
+            raise ReviewError(
+                f"review spec_id {review.get('spec_id')!r} does not match "
+                f"session spec_id {meta.get('spec_id')!r}",
+                http_status=409,
+            )
+        cur_decisions_path = (
+            session_dir(sid) / "revisions" / str(cur) / "decisions.json"
+        )
+        cur_sidecar = json.loads(cur_decisions_path.read_text("utf-8"))
+        if review.get("spec_version") != cur_sidecar.get("version"):
+            raise ReviewError(
+                f"review spec_version {review.get('spec_version')!r} does not "
+                f"match session current revision (rev {cur}) version "
+                f"{cur_sidecar.get('version')!r}",
+                http_status=409,
+            )
+        rev_dir = session_dir(sid) / "reviews" / str(cur)
+        rev_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(rev_dir / "review.json", review_bytes)
+        atomic_write_text(rev_dir / "submitted_at", now_iso() + "\n")
+        meta["status"] = "review_submitted"
+        save_meta(sid, meta)
+        return {
+            "session_id": sid,
+            "revision": cur,
+            "status": "review_submitted",
+        }
+
+
 def cmd_submit_review(args) -> int:
-    meta = resolve_session(args.session)
+    resolve_session(args.session)  # exit 2/3 on bad id / missing session
     review_path = Path(args.review_path)
     if not review_path.exists():
         sys.stderr.write(f"error: review file {review_path} not found\n")
         return 2
     review_bytes = review_path.read_bytes()
     try:
-        review = json.loads(review_bytes)
-    except json.JSONDecodeError as e:
-        sys.stderr.write(f"error: {review_path} is not valid JSON: {e}\n")
+        payload = record_review_for_session(args.session, review_bytes)
+    except ReviewError as e:
+        sys.stderr.write(f"error: {e.message}\n")
         return 2
-    cur = meta["current_revision"]
-    if cur < 1:
-        sys.stderr.write(f"error: session {args.session} has no revisions yet\n")
-        return 2
-    # Validate that this review actually belongs to the current revision.
-    if review.get("spec_id") != meta.get("spec_id"):
-        sys.stderr.write(
-            f"error: review spec_id {review.get('spec_id')!r} does not match "
-            f"session spec_id {meta.get('spec_id')!r}\n"
-        )
-        return 2
-    cur_decisions_path = (
-        session_dir(args.session) / "revisions" / str(cur) / "decisions.json"
-    )
-    cur_sidecar = json.loads(cur_decisions_path.read_text("utf-8"))
-    if review.get("spec_version") != cur_sidecar.get("version"):
-        sys.stderr.write(
-            f"error: review spec_version {review.get('spec_version')!r} does "
-            f"not match session current revision (rev {cur}) version "
-            f"{cur_sidecar.get('version')!r}\n"
-        )
-        return 2
-    rev_dir = session_dir(args.session) / "reviews" / str(cur)
-    rev_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(rev_dir / "review.json", review_bytes)
-    atomic_write_text(rev_dir / "submitted_at", now_iso() + "\n")
-    meta["status"] = "review_submitted"
-    save_meta(args.session, meta)
-    _emit({
-        "session_id": args.session,
-        "revision": cur,
-        "status": "review_submitted",
-    })
+    _emit(payload)
     return 0
 
 
@@ -304,17 +399,21 @@ def cmd_pull(args) -> int:
 
 
 def cmd_applied(args) -> int:
-    meta = resolve_session(args.session)
-    meta["status"] = "applied"
-    save_meta(args.session, meta)
+    resolve_session(args.session)
+    with session_write_lock(args.session):
+        meta = load_meta(args.session)
+        meta["status"] = "applied"
+        save_meta(args.session, meta)
     _emit({"session_id": args.session, "status": "applied"})
     return 0
 
 
 def cmd_dismiss(args) -> int:
-    meta = resolve_session(args.session)
-    meta["status"] = "closed"
-    save_meta(args.session, meta)
+    resolve_session(args.session)
+    with session_write_lock(args.session):
+        meta = load_meta(args.session)
+        meta["status"] = "closed"
+        save_meta(args.session, meta)
     _emit({"session_id": args.session, "status": "closed"})
     return 0
 
@@ -354,6 +453,184 @@ def cmd_status(args) -> int:
 def cmd_open(args) -> int:
     resolve_session(args.session)
     sys.stdout.write(session_url(args.session) + "\n")
+    return 0
+
+
+def _list_session_rows(include_closed: bool) -> list[dict]:
+    rows = []
+    for d in sorted(sessions_root().iterdir()):
+        if not d.is_dir():
+            continue
+        meta_path = d / "meta.json"
+        if not meta_path.exists():
+            continue
+        meta = json.loads(meta_path.read_text("utf-8"))
+        if not include_closed and meta.get("status") == "closed":
+            continue
+        rows.append(meta)
+    rows.sort(key=lambda m: m.get("updated_at", ""), reverse=True)
+    return rows
+
+
+def _render_index_html(rows: list[dict]) -> str:
+    cells = []
+    for m in rows:
+        sid = m["session_id"]
+        cells.append(
+            "<tr>"
+            f"<td><a href='/sessions/{html_lib.escape(sid)}'>{html_lib.escape(sid)}</a></td>"
+            f"<td>{html_lib.escape(m.get('spec_title') or '')}</td>"
+            f"<td>{html_lib.escape(m.get('basename') or '')}</td>"
+            f"<td>{html_lib.escape(m.get('status') or '')}</td>"
+            f"<td>rev {html_lib.escape(str(m.get('current_revision') or ''))}</td>"
+            f"<td>{html_lib.escape(m.get('updated_at') or '')}</td>"
+            f"<td>{html_lib.escape(m.get('project_path') or '')}</td>"
+            "</tr>"
+        )
+    body = "".join(cells) or "<tr><td colspan='7'><em>No open sessions.</em></td></tr>"
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>RIView sessions</title>"
+        "<style>"
+        "body{font-family:system-ui,sans-serif;margin:2rem;color:#1a1a1a;}"
+        "h1{font-size:1.25rem;}table{border-collapse:collapse;width:100%;}"
+        "th,td{padding:.5rem .75rem;border-bottom:1px solid #d8dee5;text-align:left;font-size:.9rem;}"
+        "th{background:#f4f6f9;}a{color:#2452a3;text-decoration:none;}a:hover{text-decoration:underline;}"
+        "</style></head><body>"
+        "<h1>RIView sessions</h1>"
+        "<table><thead><tr>"
+        "<th>session</th><th>title</th><th>basename</th><th>status</th>"
+        "<th>revision</th><th>updated</th><th>project</th>"
+        "</tr></thead><tbody>"
+        f"{body}"
+        "</tbody></table></body></html>"
+    )
+
+
+def _render_session_html(sid: str, meta: dict, submit_token: str) -> str:
+    cur = meta.get("current_revision", 0)
+    if cur < 1:
+        return (
+            "<!doctype html><html><body><p>session "
+            f"{html_lib.escape(sid)} has no revisions yet.</p></body></html>"
+        )
+    rev_dir = session_dir(sid) / "revisions" / str(cur)
+    md_text = (rev_dir / "source.md").read_text("utf-8")
+    spec = json.loads((rev_dir / "decisions.json").read_text("utf-8"))
+    bodies = render.parse_anchored_bodies(md_text)
+    return render.build_html(
+        spec,
+        bodies,
+        submit_url=f"/sessions/{sid}/review",
+        submit_token=submit_token,
+    )
+
+
+class RIViewHandler(BaseHTTPRequestHandler):
+    server_version = "RIView/1.0"
+
+    # quiet down the default stderr access log
+    def log_message(self, format, *args):  # noqa: A002
+        pass
+
+    def _write(self, status: int, body: bytes, ctype: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _text(self, status: int, msg: str) -> None:
+        self._write(status, (msg + "\n").encode("utf-8"), "text/plain; charset=utf-8")
+
+    def _json(self, status: int, payload: dict) -> None:
+        body = (json.dumps(payload) + "\n").encode("utf-8")
+        self._write(status, body, "application/json; charset=utf-8")
+
+    def _html(self, status: int, body: str) -> None:
+        self._write(status, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    def do_GET(self):  # noqa: N802
+        path = urlsplit(self.path).path
+        if path == "/" or path == "/index.html":
+            rows = _list_session_rows(include_closed=False)
+            self._html(HTTPStatus.OK, _render_index_html(rows))
+            return
+        m = re.fullmatch(r"/sessions/([0-9a-f]{12})", path)
+        if m:
+            sid = m.group(1)
+            try:
+                meta = resolve_session(sid)
+            except CommandError as e:
+                self._text(
+                    HTTPStatus.NOT_FOUND if e.code == 3 else HTTPStatus.BAD_REQUEST,
+                    f"session {sid}: {'not found' if e.code == 3 else 'invalid id'}",
+                )
+                return
+            token = getattr(self.server, "riview_token", "")
+            self._html(HTTPStatus.OK, _render_session_html(sid, meta, token))
+            return
+        self._text(HTTPStatus.NOT_FOUND, "not found")
+
+    def do_POST(self):  # noqa: N802
+        path = urlsplit(self.path).path
+        m = re.fullmatch(r"/sessions/([0-9a-f]{12})/review", path)
+        if not m:
+            self._text(HTTPStatus.NOT_FOUND, "not found")
+            return
+        sid = m.group(1)
+
+        # Token check first — defends against drive-by cross-origin POST.
+        expected = getattr(self.server, "riview_token", "")
+        provided = self.headers.get("X-Riview-Token", "")
+        if not expected or provided != expected:
+            self._text(HTTPStatus.FORBIDDEN, "missing or invalid X-Riview-Token")
+            return
+
+        length_header = self.headers.get("Content-Length")
+        if not length_header or not length_header.isdigit():
+            self._text(HTTPStatus.LENGTH_REQUIRED, "Content-Length required")
+            return
+        length = int(length_header)
+        if length > MAX_REVIEW_BYTES:
+            self._text(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "review too large")
+            return
+        body = self.rfile.read(length)
+
+        try:
+            resolve_session(sid)
+        except CommandError as e:
+            self._text(
+                HTTPStatus.NOT_FOUND if e.code == 3 else HTTPStatus.BAD_REQUEST,
+                f"session {sid}: {'not found' if e.code == 3 else 'invalid id'}",
+            )
+            return
+
+        try:
+            payload = record_review_for_session(sid, body)
+        except ReviewError as e:
+            self._text(e.http_status, e.message)
+            return
+        self._json(HTTPStatus.OK, payload)
+
+
+def cmd_daemon(args) -> int:
+    host = args.host
+    port = args.port
+    token = ensure_token()
+    server = ThreadingHTTPServer((host, port), RIViewHandler)
+    server.riview_token = token  # type: ignore[attr-defined]
+    sys.stderr.write(
+        f"riview daemon listening on http://{host}:{port}/ "
+        f"(token at {token_path()})\n"
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        sys.stderr.write("\nriview daemon shutting down\n")
+    finally:
+        server.server_close()
     return 0
 
 
@@ -423,6 +700,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("session", help="Session ID.")
     s.set_defaults(func=cmd_open)
+
+    s = sub.add_parser(
+        "daemon",
+        help="Run the HTTP daemon (browser review UI). Defaults to 127.0.0.1:7891.",
+    )
+    s.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1).")
+    s.add_argument(
+        "--port", type=int, default=DEFAULT_PORT, help=f"Port (default {DEFAULT_PORT})."
+    )
+    s.set_defaults(func=cmd_daemon)
 
     return p
 

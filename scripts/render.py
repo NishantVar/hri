@@ -112,7 +112,13 @@ def summary_counts(spec: dict) -> dict:
     return counts
 
 
-def build_html(spec: dict, bodies: dict[str, str]) -> str:
+def build_html(
+    spec: dict,
+    bodies: dict[str, str],
+    *,
+    submit_url: str = "",
+    submit_token: str = "",
+) -> str:
     # Attach rendered body markdown to each node for the JS-free fallback view.
     enriched_nodes = []
     for node in spec["nodes"]:
@@ -136,10 +142,13 @@ def build_html(spec: dict, bodies: dict[str, str]) -> str:
 
     title = html.escape(spec["spec_title"])
     spec_id = html.escape(spec["spec_id"])
+    submit_payload = json.dumps({"url": submit_url, "token": submit_token})
+    submit_payload = submit_payload.replace("</", "<\\/")
     return TEMPLATE.replace("__TITLE__", title) \
         .replace("__SPEC_ID__", spec_id) \
         .replace("__VERSION__", str(spec["version"])) \
         .replace("__PAYLOAD__", payload_json) \
+        .replace("__SUBMIT__", submit_payload) \
         .replace("__GENERATED_AT__", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
@@ -540,6 +549,7 @@ TEMPLATE = r"""<!doctype html>
   </div>
   <div class="modal-actions">
     <span class="copied" id="copied-msg"></span>
+    <button type="button" class="primary" id="submit-server-btn" hidden>Submit to RIView server</button>
     <button type="button" class="secondary" id="download-btn">Download .json</button>
     <button type="button" class="secondary" id="copy-btn">Copy</button>
     <button type="button" class="primary" id="close-btn">Close</button>
@@ -548,6 +558,9 @@ TEMPLATE = r"""<!doctype html>
 
 <script type="application/json" id="spec-payload">
 __PAYLOAD__
+</script>
+<script type="application/json" id="submit-config">
+__SUBMIT__
 </script>
 
 <script>
@@ -915,6 +928,37 @@ __PAYLOAD__
       a.click();
       URL.revokeObjectURL(a.href);
     });
+
+    const SUBMIT = JSON.parse(document.getElementById("submit-config").textContent);
+    const submitBtn = document.getElementById("submit-server-btn");
+    if (SUBMIT.url) {
+      submitBtn.hidden = false;
+      submitBtn.addEventListener("click", async () => {
+        submitBtn.disabled = true;
+        copied.textContent = "Submitting...";
+        try {
+          const res = await fetch(SUBMIT.url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Riview-Token": SUBMIT.token,
+            },
+            body: output.value,
+          });
+          if (!res.ok) {
+            const txt = await res.text();
+            copied.textContent = "Submit failed (" + res.status + "): " + txt.slice(0, 200);
+          } else {
+            const data = await res.json().catch(() => ({}));
+            copied.textContent = "Submitted (rev " + (data.revision || "?") + ", status " + (data.status || "?") + ")";
+          }
+        } catch (err) {
+          copied.textContent = "Submit error: " + err;
+        } finally {
+          submitBtn.disabled = false;
+        }
+      });
+    }
 
     document.getElementById("reset-btn").addEventListener("click", () => {
       if (!confirm("Clear all review inputs on this page?")) return;
