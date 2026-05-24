@@ -193,6 +193,23 @@ def read_spec(dir_: Path, basename: str):
     return md, js, sidecar
 
 
+def validate_spec_pair(md_bytes: bytes, sidecar: dict) -> list[str]:
+    """Apply render.validate() to a spec pair.
+
+    Used by both submit (pre-persistence) and the daemon (pre-render). Keeps
+    one definition of "well-formed enough to safely render": fail fast on
+    bad input rather than letting it land on disk or in a token-bearing page.
+    """
+    try:
+        md_text = md_bytes.decode("utf-8")
+    except UnicodeDecodeError as e:
+        return [f"source markdown is not valid utf-8: {e}"]
+    if not isinstance(sidecar, dict) or "nodes" not in sidecar:
+        return ["decisions sidecar must be an object with a 'nodes' array"]
+    anchor_counts = render.count_anchor_openings(md_text)
+    return render.validate(sidecar, anchor_counts)
+
+
 def session_url(sid: str) -> str:
     return f"http://127.0.0.1:{DEFAULT_PORT}/sessions/{sid}"
 
@@ -228,6 +245,15 @@ def resolve_session(sid: str) -> dict:
 def cmd_submit(args) -> int:
     dir_ = Path(args.dir).resolve()
     md_bytes, json_bytes, sidecar = read_spec(dir_, args.basename)
+    errors = validate_spec_pair(md_bytes, sidecar)
+    if errors:
+        sys.stderr.write(
+            f"error: spec failed validation ({len(errors)} issue"
+            f"{'s' if len(errors) != 1 else ''}):\n"
+        )
+        for e in errors:
+            sys.stderr.write(f"  - {e}\n")
+        return 2
     md_hash = sha256_hex(md_bytes)
     json_hash = sha256_hex(json_bytes)
 
@@ -520,22 +546,62 @@ def _render_index_html(rows: list[dict]) -> str:
     )
 
 
-def _render_session_html(sid: str, meta: dict, submit_token: str) -> str:
+def _render_session_html(
+    sid: str, meta: dict, submit_token: str
+) -> tuple[int, str]:
+    """Return (http_status, html_body) for the per-session page.
+
+    Re-runs render.validate() against the stored spec. If it fails, returns
+    a plain error page WITHOUT the submit-config token — refusing to hand a
+    write capability to an XSS vector hiding in the stored sidecar.
+    """
     cur = meta.get("current_revision", 0)
     if cur < 1:
-        return (
+        body = (
             "<!doctype html><html><body><p>session "
             f"{html_lib.escape(sid)} has no revisions yet.</p></body></html>"
         )
+        return HTTPStatus.OK, body
     rev_dir = session_dir(sid) / "revisions" / str(cur)
-    md_text = (rev_dir / "source.md").read_text("utf-8")
-    spec = json.loads((rev_dir / "decisions.json").read_text("utf-8"))
+    md_bytes = (rev_dir / "source.md").read_bytes()
+    json_bytes = (rev_dir / "decisions.json").read_bytes()
+    try:
+        spec = json.loads(json_bytes)
+    except json.JSONDecodeError:
+        spec = None
+    if spec is None:
+        return HTTPStatus.CONFLICT, _render_invalid_session_html(
+            sid, ["decisions.json is not valid JSON"]
+        )
+    errors = validate_spec_pair(md_bytes, spec)
+    if errors:
+        return HTTPStatus.CONFLICT, _render_invalid_session_html(sid, errors)
+    md_text = md_bytes.decode("utf-8")
     bodies = render.parse_anchored_bodies(md_text)
-    return render.build_html(
+    return HTTPStatus.OK, render.build_html(
         spec,
         bodies,
         submit_url=f"/sessions/{sid}/review",
         submit_token=submit_token,
+    )
+
+
+def _render_invalid_session_html(sid: str, errors: list[str]) -> str:
+    items = "".join(f"<li>{html_lib.escape(e)}</li>" for e in errors)
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>session {html_lib.escape(sid)} invalid</title>"
+        "<style>body{font-family:system-ui,sans-serif;margin:2rem;color:#1a1a1a;}"
+        "h1{font-size:1.1rem;}li{margin:.25rem 0;}</style></head><body>"
+        f"<h1>session {html_lib.escape(sid)} failed validation</h1>"
+        "<p>The stored spec for this session does not pass renderer validation. "
+        "The review UI is suppressed because it would otherwise embed an auth "
+        "token on a page derived from untrusted content.</p>"
+        f"<ul>{items}</ul>"
+        "<p>Re-submit a corrected spec with "
+        "<code>riview submit &lt;dir&gt; --session "
+        f"{html_lib.escape(sid)}</code>.</p>"
+        "</body></html>"
     )
 
 
@@ -582,7 +648,8 @@ class RIViewHandler(BaseHTTPRequestHandler):
                 )
                 return
             token = getattr(self.server, "riview_token", "")
-            self._html(HTTPStatus.OK, _render_session_html(sid, meta, token))
+            status, html_body = _render_session_html(sid, meta, token)
+            self._html(status, html_body)
             return
         self._text(HTTPStatus.NOT_FOUND, "not found")
 

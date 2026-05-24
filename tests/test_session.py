@@ -170,6 +170,25 @@ class RiviewSessionTests(unittest.TestCase):
             )
             self.run_cli("submit", str(SAMPLE), "--session", bad, expect=2)
 
+    def test_submit_rejects_hostile_sidecar(self):
+        # render.validate() rejects bad statuses; submit must enforce the same
+        # gate before persisting so the daemon never embeds a token in a page
+        # derived from untrusted content.
+        with tempfile.TemporaryDirectory() as workspace:
+            wd = Path(workspace)
+            (wd / "spec.md").write_bytes((SAMPLE / "spec.md").read_bytes())
+            sidecar = json.loads((SAMPLE / "spec.decisions.json").read_text())
+            # Pick a real node and break its status.
+            sidecar["nodes"][0]["status"] = '" onerror="alert(1)'
+            (wd / "spec.decisions.json").write_text(json.dumps(sidecar))
+            r = self.run_cli("submit", str(wd), expect=2)
+            self.assertIn("failed validation", r.stderr)
+            self.assertIn("status", r.stderr)
+            # Nothing was persisted.
+            sessions = Path(self.tmp) / "sessions"
+            if sessions.exists():
+                self.assertEqual(list(sessions.iterdir()), [])
+
     def test_submit_session_rejects_basename_mismatch(self):
         # Create a session with basename "spec" from the sample, then try to
         # advance it from design/mvp (different basename) — must exit 2.

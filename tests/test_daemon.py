@@ -215,6 +215,27 @@ class RiviewDaemonTests(unittest.TestCase):
             urllib.request.urlopen(req).read()
         self.assertEqual(cm.exception.code, 400)
 
+    def test_invalid_stored_session_returns_409_without_token(self):
+        # Simulate a session whose stored sidecar somehow has a hostile field
+        # (e.g. legacy data from before validation was wired in, or a corrupted
+        # write). The daemon must refuse to embed the auth token in a page
+        # derived from this content.
+        sid = self._submit_sample()
+        rev_dir = Path(self.tmp) / "sessions" / sid / "revisions" / "1"
+        sidecar = json.loads((rev_dir / "decisions.json").read_text())
+        sidecar["nodes"][0]["status"] = '"><script>alert(1)</script>'
+        (rev_dir / "decisions.json").write_text(json.dumps(sidecar))
+
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(self.base + f"/sessions/{sid}").read()
+        self.assertEqual(cm.exception.code, 409)
+        body = cm.exception.read().decode("utf-8")
+        # The error page MUST NOT carry the auth token or the submit-config.
+        self.assertNotIn(self._token(), body)
+        self.assertNotIn("submit-config", body)
+        # Should explain what failed.
+        self.assertIn("failed validation", body)
+
     def test_token_file_perms_0600(self):
         self._submit_sample()
         # Trigger ensure_token via a daemon hit; the daemon already created it
