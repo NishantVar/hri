@@ -215,6 +215,25 @@ class RiviewDaemonTests(unittest.TestCase):
             urllib.request.urlopen(req).read()
         self.assertEqual(cm.exception.code, 400)
 
+    def test_malformed_shape_stored_session_returns_409_without_crash(self):
+        # Shape-level corruption (nodes is a string, not a list) used to
+        # traceback in render.validate(). The wrapper now guards it, so the
+        # daemon should return 409 just like the enum-violation case.
+        sid = self._submit_sample()
+        rev_dir = Path(self.tmp) / "sessions" / sid / "revisions" / "1"
+        sidecar = json.loads((rev_dir / "decisions.json").read_text())
+        sidecar["nodes"] = "bad"
+        (rev_dir / "decisions.json").write_text(json.dumps(sidecar))
+
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(self.base + f"/sessions/{sid}").read()
+        self.assertEqual(cm.exception.code, 409)
+        body = cm.exception.read().decode("utf-8")
+        self.assertNotIn(self._token(), body)
+        self.assertNotIn("submit-config", body)
+        # Daemon should still be alive on the next request.
+        urllib.request.urlopen(self.base + "/").read()
+
     def test_invalid_stored_session_returns_409_without_token(self):
         # Simulate a session whose stored sidecar somehow has a hostile field
         # (e.g. legacy data from before validation was wired in, or a corrupted

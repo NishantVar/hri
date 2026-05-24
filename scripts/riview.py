@@ -199,13 +199,34 @@ def validate_spec_pair(md_bytes: bytes, sidecar: dict) -> list[str]:
     Used by both submit (pre-persistence) and the daemon (pre-render). Keeps
     one definition of "well-formed enough to safely render": fail fast on
     bad input rather than letting it land on disk or in a token-bearing page.
+
+    Also performs the shape checks that render.validate() assumes (nodes is
+    a list of dicts with an id), since render.validate() would otherwise
+    traceback on malformed-but-syntactically-valid sidecars.
     """
     try:
         md_text = md_bytes.decode("utf-8")
     except UnicodeDecodeError as e:
         return [f"source markdown is not valid utf-8: {e}"]
-    if not isinstance(sidecar, dict) or "nodes" not in sidecar:
-        return ["decisions sidecar must be an object with a 'nodes' array"]
+    if not isinstance(sidecar, dict):
+        return ["decisions sidecar must be a JSON object"]
+    if "nodes" not in sidecar:
+        return ["decisions sidecar must have a 'nodes' array"]
+    nodes = sidecar["nodes"]
+    if not isinstance(nodes, list):
+        return [f"'nodes' must be an array, got {type(nodes).__name__}"]
+    shape_errors: list[str] = []
+    for i, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            shape_errors.append(
+                f"nodes[{i}] must be an object, got {type(node).__name__}"
+            )
+            continue
+        for required in ("id", "kind"):
+            if required not in node:
+                shape_errors.append(f"nodes[{i}] missing required field {required!r}")
+    if shape_errors:
+        return shape_errors
     anchor_counts = render.count_anchor_openings(md_text)
     return render.validate(sidecar, anchor_counts)
 

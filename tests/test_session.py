@@ -189,6 +189,29 @@ class RiviewSessionTests(unittest.TestCase):
             if sessions.exists():
                 self.assertEqual(list(sessions.iterdir()), [])
 
+    def test_submit_rejects_nodes_not_list(self):
+        # render.validate() assumes nodes is iterable-of-dicts; the wrapper
+        # must guard the shape so submit returns exit 2 instead of tracing
+        # back when nodes is e.g. a string.
+        with tempfile.TemporaryDirectory() as workspace:
+            wd = Path(workspace)
+            (wd / "spec.md").write_bytes((SAMPLE / "spec.md").read_bytes())
+            sidecar = json.loads((SAMPLE / "spec.decisions.json").read_text())
+            sidecar["nodes"] = "bad"
+            (wd / "spec.decisions.json").write_text(json.dumps(sidecar))
+            r = self.run_cli("submit", str(wd), expect=2)
+            self.assertIn("'nodes' must be an array", r.stderr)
+
+    def test_submit_rejects_node_not_object(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            wd = Path(workspace)
+            (wd / "spec.md").write_bytes((SAMPLE / "spec.md").read_bytes())
+            sidecar = json.loads((SAMPLE / "spec.decisions.json").read_text())
+            sidecar["nodes"][0] = "not-a-dict"
+            (wd / "spec.decisions.json").write_text(json.dumps(sidecar))
+            r = self.run_cli("submit", str(wd), expect=2)
+            self.assertIn("nodes[0] must be an object", r.stderr)
+
     def test_submit_session_rejects_basename_mismatch(self):
         # Create a session with basename "spec" from the sample, then try to
         # advance it from design/mvp (different basename) — must exit 2.
