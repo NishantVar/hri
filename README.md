@@ -82,6 +82,84 @@ To start a second review cycle on top of rev1: `python3 scripts/render.py sample
 
 Each rev sidecar records `applied_from_review.review_path` and `applied_from_review.body_edits`, so you can always trace which JSON produced which rev and which anchors it touched. The rev sidecar's `source_path` points at the rev's own markdown (`spec.rev<N>.md`).
 
+## Session inbox (daemon)
+
+The file-and-path workflow above is fine for one spec at a time, but multiple
+agents working in parallel need a shared place to drop reviews into. The
+**session inbox** is RIView's cross-project store: each registered review is a
+*session* under `~/.riview/sessions/<session-id>/`, with revisioned spec history
+(`revisions/N/source.md` + `decisions.json`) and revisioned review history
+(`reviews/N/review.json`).
+
+This README documents **slice 1a** — the on-disk model and the agent-facing CLI.
+The HTTP daemon that exposes a browser UI on `http://127.0.0.1:7891/` lands in
+slice 1b; the CLI works standalone without it.
+
+### Layout
+
+```
+~/.riview/
+  sessions/
+    <session-id>/
+      meta.json              # session_id, project_path, basename, spec_id, spec_title,
+                             # status, current_revision, content hashes per revision, ...
+      revisions/
+        1/  source.md  decisions.json  submitted_at
+        2/  source.md  decisions.json  submitted_at
+      reviews/
+        1/  review.json  submitted_at
+```
+
+Override the storage root with `RIVIEW_HOME=/path/to/dir` (tests use this).
+
+### Session lifecycle
+
+- `awaiting_review` — a revision has been submitted but no review exists for it yet.
+- `review_submitted` — a review has been recorded against the current revision.
+- `applied` — the agent has picked the review up (either by calling `applied` explicitly or by submitting a newer revision).
+- `closed` — manually dismissed.
+
+`pull` is **idempotent**: it returns the latest submitted review for the current
+revision every call, never consumes. The agent advances the session forward by
+submitting a new revision with `--session <id>` after applying the review.
+
+### CLI
+
+```bash
+# Register a spec as a new session (prints session_id + URL).
+python3 riview/scripts/riview.py submit design --basename mvp
+
+# Idempotent re-submit (identical content) returns the existing revision.
+# Changed content advances to revision 2 inside the same session.
+python3 riview/scripts/riview.py submit design --basename mvp --session <id>
+
+# Record a review JSON against the session's current revision.
+# (In slice 1b this happens via the browser; the CLI hook is here for testing.)
+python3 riview/scripts/riview.py submit-review <id> /path/to/review.json
+
+# Print the latest review for the current revision (exits 4 if none).
+python3 riview/scripts/riview.py pull <id>
+
+# Mark a session as applied (after the agent applies a pulled review).
+python3 riview/scripts/riview.py applied <id>
+
+# List open sessions across all projects (--all includes closed).
+python3 riview/scripts/riview.py list
+
+# Show full meta.json, print the daemon URL, or close the session.
+python3 riview/scripts/riview.py status <id>
+python3 riview/scripts/riview.py open <id>
+python3 riview/scripts/riview.py dismiss <id>
+```
+
+Exit codes: `0` ok, `2` bad input, `3` session not found, `4` no review for current revision.
+
+Smoke tests live at `riview/tests/test_session.py`:
+
+```bash
+python3 -m unittest riview.tests.test_session
+```
+
 ## Design choices
 
 - **Anchors are HTML comments.** Invisible when rendered as markdown by any other tool. Surgical body edits possible without touching unrelated text. Comment-only edits guaranteed.
@@ -105,6 +183,8 @@ Each rev sidecar records `applied_from_review.review_path` and `applied_from_rev
 | `SCHEMA.md`                           | Data-model reference                             |
 | `scripts/render.py`                   | Spec → interactive HTML                          |
 | `scripts/apply.py`                    | Review delta → `spec.rev<N>.*`                   |
+| `scripts/riview.py`                   | Session inbox CLI (`submit/list/pull/...`)       |
+| `tests/test_session.py`               | Smoke tests for the session model                |
 | `sample/spec.md`                      | Demo: Pomodoro Timer MVP, markdown view          |
 | `sample/spec.decisions.json`          | Demo: structured graph (6 nodes)                 |
 | `sample/review-demo.json`             | Demo review delta exercising every code path     |
