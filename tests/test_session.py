@@ -158,6 +158,67 @@ class RiviewSessionTests(unittest.TestCase):
         self.assertTrue(url.startswith("http://127.0.0.1:"))
         self.assertTrue(url.endswith(f"/sessions/{sid}"))
 
+    def test_malformed_session_id(self):
+        # Includes traversal attempts, wrong length, wrong charset, empty,
+        # whitespace. All must return exit 2 (bad input) — not 3.
+        bad_ids = ["../foo", "deadbeef", "DEADBEEFDEAD", "g" * 12, "abc", ""]
+        for bad in bad_ids:
+            for sub in ("status", "pull", "dismiss", "applied", "open"):
+                self.run_cli(sub, bad, expect=2)
+            self.run_cli(
+                "submit-review", bad, str(SAMPLE / "review-demo.json"), expect=2
+            )
+            self.run_cli("submit", str(SAMPLE), "--session", bad, expect=2)
+
+    def test_submit_session_rejects_basename_mismatch(self):
+        # Create a session with basename "spec" from the sample, then try to
+        # advance it from design/mvp (different basename) — must exit 2.
+        sid = self._last_json_line(self.run_cli("submit", str(SAMPLE)).stdout)["session_id"]
+        design = REPO_ROOT / "design"
+        if not (design / "mvp.md").exists():
+            self.skipTest("design/mvp.md fixture not present")
+        self.run_cli(
+            "submit", str(design), "--basename", "mvp", "--session", sid, expect=2
+        )
+
+    def test_submit_session_rejects_spec_id_mismatch(self):
+        # Same basename but a different spec_id in the sidecar → exit 2.
+        sid = self._last_json_line(self.run_cli("submit", str(SAMPLE)).stdout)["session_id"]
+        with tempfile.TemporaryDirectory() as workspace:
+            wd = Path(workspace)
+            (wd / "spec.md").write_bytes((SAMPLE / "spec.md").read_bytes())
+            sidecar = json.loads((SAMPLE / "spec.decisions.json").read_text())
+            sidecar["spec_id"] = "different-spec"
+            (wd / "spec.decisions.json").write_text(json.dumps(sidecar))
+            self.run_cli("submit", str(wd), "--session", sid, expect=2)
+
+    def test_submit_review_rejects_spec_id_mismatch(self):
+        sid = self._last_json_line(self.run_cli("submit", str(SAMPLE)).stdout)["session_id"]
+        with tempfile.TemporaryDirectory() as workspace:
+            bad_review = Path(workspace) / "review.json"
+            review = json.loads((SAMPLE / "review-demo.json").read_text())
+            review["spec_id"] = "not-the-pomodoro-spec"
+            bad_review.write_text(json.dumps(review))
+            self.run_cli("submit-review", sid, str(bad_review), expect=2)
+
+    def test_submit_review_rejects_spec_version_mismatch(self):
+        sid = self._last_json_line(self.run_cli("submit", str(SAMPLE)).stdout)["session_id"]
+        with tempfile.TemporaryDirectory() as workspace:
+            bad_review = Path(workspace) / "review.json"
+            review = json.loads((SAMPLE / "review-demo.json").read_text())
+            review["spec_version"] = review.get("spec_version", 1) + 99
+            bad_review.write_text(json.dumps(review))
+            self.run_cli("submit-review", sid, str(bad_review), expect=2)
+
+    def test_traversal_does_not_escape_storage_root(self):
+        # Even though malformed IDs short-circuit, sanity-check that no file
+        # outside RIVIEW_HOME got created.
+        before = set(Path(self.tmp).rglob("*"))
+        self.run_cli("status", "../escape", expect=2)
+        self.run_cli("status", "../../etc/passwd", expect=2)
+        after = set(Path(self.tmp).rglob("*"))
+        self.assertEqual(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()

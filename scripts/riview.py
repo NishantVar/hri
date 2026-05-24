@@ -10,8 +10,9 @@ Override the storage root with the RIVIEW_HOME environment variable.
 
 Exit codes:
   0  success
-  2  bad input / missing files / invalid JSON
-  3  session not found
+  2  bad input / missing files / invalid JSON / malformed session id /
+     cross-spec contamination (mismatched basename or spec_id)
+  3  session not found (well-formed id, no matching session)
   4  no review available for the session's current revision
 """
 
@@ -19,6 +20,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -28,9 +30,20 @@ from pathlib import Path
 
 DEFAULT_PORT = 7891  # daemon will listen here in slice 1b; CLI uses it to print URLs.
 
+SESSION_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
 
 class SessionNotFound(Exception):
     pass
+
+
+class InvalidSessionId(Exception):
+    pass
+
+
+def validate_session_id(sid: str) -> None:
+    if not isinstance(sid, str) or not SESSION_ID_RE.fullmatch(sid):
+        raise InvalidSessionId(sid)
 
 
 def riview_home() -> Path:
@@ -78,6 +91,7 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def session_dir(sid: str) -> Path:
+    validate_session_id(sid)
     return sessions_root() / sid
 
 
@@ -116,6 +130,31 @@ def session_url(sid: str) -> str:
     return f"http://127.0.0.1:{DEFAULT_PORT}/sessions/{sid}"
 
 
+class CommandError(Exception):
+    """Raised to short-circuit a command with a specific exit code."""
+
+    def __init__(self, code: int):
+        super().__init__(f"exit {code}")
+        self.code = code
+
+
+def resolve_session(sid: str) -> dict:
+    """Load and return a session's meta.json; raise CommandError on failure.
+
+    Exit 2 = malformed session id, exit 3 = well-formed but missing.
+    """
+    try:
+        return load_meta(sid)
+    except InvalidSessionId:
+        sys.stderr.write(
+            f"error: invalid session id {sid!r} (expected 12 hex chars)\n"
+        )
+        raise CommandError(2)
+    except SessionNotFound:
+        sys.stderr.write(f"error: session {sid} not found\n")
+        raise CommandError(3)
+
+
 # === commands ===
 
 
@@ -125,13 +164,24 @@ def cmd_submit(args) -> int:
     md_hash = sha256_hex(md_bytes)
     json_hash = sha256_hex(json_bytes)
 
-    if args.session:
-        try:
-            meta = load_meta(args.session)
-        except SessionNotFound:
-            sys.stderr.write(f"error: session {args.session} not found\n")
-            return 3
+    if args.session is not None:
+        meta = resolve_session(args.session)
         sid = args.session
+        # Cross-spec contamination guards: an existing session is pinned to a
+        # specific (basename, spec_id). Reject mismatched submits.
+        if args.basename != meta.get("basename"):
+            sys.stderr.write(
+                f"error: session {sid} is for basename {meta.get('basename')!r}, "
+                f"not {args.basename!r}\n"
+            )
+            return 2
+        incoming_spec_id = sidecar.get("spec_id")
+        if incoming_spec_id != meta.get("spec_id"):
+            sys.stderr.write(
+                f"error: session {sid} is for spec_id {meta.get('spec_id')!r}, "
+                f"not {incoming_spec_id!r}\n"
+            )
+            return 2
         cur = meta.get("current_revision", 0)
         cur_hashes = meta.get("revisions", {}).get(str(cur), {})
         if (
@@ -190,24 +240,38 @@ def cmd_submit(args) -> int:
 
 
 def cmd_submit_review(args) -> int:
-    try:
-        meta = load_meta(args.session)
-    except SessionNotFound:
-        sys.stderr.write(f"error: session {args.session} not found\n")
-        return 3
+    meta = resolve_session(args.session)
     review_path = Path(args.review_path)
     if not review_path.exists():
         sys.stderr.write(f"error: review file {review_path} not found\n")
         return 2
     review_bytes = review_path.read_bytes()
     try:
-        json.loads(review_bytes)
+        review = json.loads(review_bytes)
     except json.JSONDecodeError as e:
         sys.stderr.write(f"error: {review_path} is not valid JSON: {e}\n")
         return 2
     cur = meta["current_revision"]
     if cur < 1:
         sys.stderr.write(f"error: session {args.session} has no revisions yet\n")
+        return 2
+    # Validate that this review actually belongs to the current revision.
+    if review.get("spec_id") != meta.get("spec_id"):
+        sys.stderr.write(
+            f"error: review spec_id {review.get('spec_id')!r} does not match "
+            f"session spec_id {meta.get('spec_id')!r}\n"
+        )
+        return 2
+    cur_decisions_path = (
+        session_dir(args.session) / "revisions" / str(cur) / "decisions.json"
+    )
+    cur_sidecar = json.loads(cur_decisions_path.read_text("utf-8"))
+    if review.get("spec_version") != cur_sidecar.get("version"):
+        sys.stderr.write(
+            f"error: review spec_version {review.get('spec_version')!r} does "
+            f"not match session current revision (rev {cur}) version "
+            f"{cur_sidecar.get('version')!r}\n"
+        )
         return 2
     rev_dir = session_dir(args.session) / "reviews" / str(cur)
     rev_dir.mkdir(parents=True, exist_ok=True)
@@ -224,11 +288,7 @@ def cmd_submit_review(args) -> int:
 
 
 def cmd_pull(args) -> int:
-    try:
-        meta = load_meta(args.session)
-    except SessionNotFound:
-        sys.stderr.write(f"error: session {args.session} not found\n")
-        return 3
+    meta = resolve_session(args.session)
     cur = meta["current_revision"]
     review_path = session_dir(args.session) / "reviews" / str(cur) / "review.json"
     if not review_path.exists():
@@ -236,18 +296,15 @@ def cmd_pull(args) -> int:
             f"no review for session {args.session} current revision (rev {cur})\n"
         )
         return 4
-    sys.stdout.write(review_path.read_text("utf-8"))
-    if not review_path.read_text("utf-8").endswith("\n"):
+    body = review_path.read_text("utf-8")
+    sys.stdout.write(body)
+    if not body.endswith("\n"):
         sys.stdout.write("\n")
     return 0
 
 
 def cmd_applied(args) -> int:
-    try:
-        meta = load_meta(args.session)
-    except SessionNotFound:
-        sys.stderr.write(f"error: session {args.session} not found\n")
-        return 3
+    meta = resolve_session(args.session)
     meta["status"] = "applied"
     save_meta(args.session, meta)
     _emit({"session_id": args.session, "status": "applied"})
@@ -255,11 +312,7 @@ def cmd_applied(args) -> int:
 
 
 def cmd_dismiss(args) -> int:
-    try:
-        meta = load_meta(args.session)
-    except SessionNotFound:
-        sys.stderr.write(f"error: session {args.session} not found\n")
-        return 3
+    meta = resolve_session(args.session)
     meta["status"] = "closed"
     save_meta(args.session, meta)
     _emit({"session_id": args.session, "status": "closed"})
@@ -293,21 +346,13 @@ def cmd_list(args) -> int:
 
 
 def cmd_status(args) -> int:
-    try:
-        meta = load_meta(args.session)
-    except SessionNotFound:
-        sys.stderr.write(f"error: session {args.session} not found\n")
-        return 3
+    meta = resolve_session(args.session)
     sys.stdout.write(json.dumps(meta, indent=2, sort_keys=True) + "\n")
     return 0
 
 
 def cmd_open(args) -> int:
-    try:
-        load_meta(args.session)
-    except SessionNotFound:
-        sys.stderr.write(f"error: session {args.session} not found\n")
-        return 3
+    resolve_session(args.session)
     sys.stdout.write(session_url(args.session) + "\n")
     return 0
 
@@ -384,7 +429,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except CommandError as e:
+        return e.code
 
 
 if __name__ == "__main__":
