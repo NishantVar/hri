@@ -164,6 +164,12 @@ python3 riview/scripts/riview.py daemon                    # 127.0.0.1:7891
 python3 riview/scripts/riview.py daemon --port 7900        # custom port
 ```
 
+By default the daemon refuses to bind anything other than loopback
+(`127.0.0.1` / `localhost` / `::1`). The auth token is embedded in
+unauthenticated `GET` pages, so a non-loopback bind would let anyone on
+the network read it from `/sessions/<id>` and POST reviews. Override with
+`--unsafe-host` if you have a tunnel / restricted LAN and accept that.
+
 Routes:
 
 - `GET /` — index page listing open sessions across all projects.
@@ -185,8 +191,9 @@ lock is a no-op; the daemon is intended for single-user, low-contention use.
 Smoke tests:
 
 ```bash
-python3 -m unittest riview.tests.test_session   # CLI / session model
-python3 -m unittest riview.tests.test_daemon    # HTTP daemon end-to-end
+python3 -m unittest riview.tests.test_session          # CLI / session model
+python3 -m unittest riview.tests.test_daemon           # HTTP daemon end-to-end
+python3 -m unittest riview.tests.test_render_validate  # renderer input hardening
 ```
 
 ## Design choices

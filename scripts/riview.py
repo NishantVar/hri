@@ -150,9 +150,19 @@ def token_path() -> Path:
 
 
 def ensure_token() -> str:
-    """Read ~/.riview/token, creating it with 0o600 perms on first call."""
+    """Read ~/.riview/token, creating it with 0o600 perms on first call.
+
+    Repairs loose perms on an existing token file so an earlier (pre-1b) or
+    user-edited token isn't world-readable while we depend on it for auth.
+    """
     p = token_path()
     if p.exists():
+        try:
+            mode = p.stat().st_mode & 0o777
+            if mode != 0o600:
+                os.chmod(p, 0o600)
+        except OSError:
+            pass  # best-effort; non-POSIX or unusual fs
         return p.read_text("utf-8").strip()
     p.parent.mkdir(parents=True, exist_ok=True)
     token = secrets.token_hex(24)
@@ -160,6 +170,9 @@ def ensure_token() -> str:
     with os.fdopen(fd, "w") as f:
         f.write(token + "\n")
     return token
+
+
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def read_spec(dir_: Path, basename: str):
@@ -618,6 +631,19 @@ class RIViewHandler(BaseHTTPRequestHandler):
 def cmd_daemon(args) -> int:
     host = args.host
     port = args.port
+    if host not in LOOPBACK_HOSTS and not args.unsafe_host:
+        sys.stderr.write(
+            f"error: refusing to bind {host!r} (non-loopback). The auth token "
+            f"is embedded in unauthenticated GET pages, so anyone with network "
+            f"access could read it and submit reviews. Re-run with "
+            f"--unsafe-host to override.\n"
+        )
+        return 2
+    if host not in LOOPBACK_HOSTS:
+        sys.stderr.write(
+            f"WARNING: binding {host!r} exposes session contents and the auth "
+            f"token to anyone with network access to this machine.\n"
+        )
     token = ensure_token()
     server = ThreadingHTTPServer((host, port), RIViewHandler)
     server.riview_token = token  # type: ignore[attr-defined]
@@ -708,6 +734,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1).")
     s.add_argument(
         "--port", type=int, default=DEFAULT_PORT, help=f"Port (default {DEFAULT_PORT})."
+    )
+    s.add_argument(
+        "--unsafe-host",
+        action="store_true",
+        help="Required to bind anything other than loopback. The token is "
+             "embedded in unauthenticated GET pages, so non-loopback bind "
+             "exposes it to the network.",
     )
     s.set_defaults(func=cmd_daemon)
 

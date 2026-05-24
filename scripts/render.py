@@ -69,16 +69,34 @@ def md_to_html(text: str) -> str:
     return "".join(out)
 
 
+ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")  # anchor-safe; matches ANCHOR_RE charset
+
+STATUS_BY_KIND = {
+    "decision": {"ai-confident", "confirmed", "rejected", "needs-work"},
+    "ambiguity": {"open", "resolved", "deferred"},
+    "risk": {"open", "accepted", "mitigated", "dismissed"},
+}
+SEVERITY_VALUES = {"low", "medium", "high"}
+
+
 def validate(spec: dict, anchor_counts: dict[str, int]) -> list[str]:
     errors: list[str] = []
     seen_ids: set[str] = set()
     declared_anchors: set[str] = set()
     for node in spec["nodes"]:
         nid = node["id"]
+        if not isinstance(nid, str) or not ID_RE.fullmatch(nid):
+            errors.append(
+                f"node id {nid!r}: must match [A-Za-z0-9_-]+ (id is interpolated into HTML attributes)"
+            )
         if nid in seen_ids:
             errors.append(f"duplicate node id: {nid}")
         seen_ids.add(nid)
         anchor = node.get("source_anchor", nid)
+        if not isinstance(anchor, str) or not ID_RE.fullmatch(anchor):
+            errors.append(
+                f"node {nid}: source_anchor {anchor!r} must match [A-Za-z0-9_-]+"
+            )
         declared_anchors.add(anchor)
         count = anchor_counts.get(anchor, 0)
         if count == 0:
@@ -87,8 +105,32 @@ def validate(spec: dict, anchor_counts: dict[str, int]) -> list[str]:
             errors.append(
                 f"node {nid}: anchor {anchor!r} occurs {count} times in source markdown (must be unique)"
             )
-        if node["kind"] not in {"decision", "ambiguity", "risk"}:
-            errors.append(f"node {nid}: unknown kind {node['kind']!r}")
+        kind = node["kind"]
+        if kind not in STATUS_BY_KIND:
+            errors.append(f"node {nid}: unknown kind {kind!r}")
+            continue  # remaining kind-specific checks need a known kind
+        status = node.get("status", "")
+        if status not in STATUS_BY_KIND[kind]:
+            errors.append(
+                f"node {nid}: status {status!r} not valid for kind {kind!r} "
+                f"(allowed: {sorted(STATUS_BY_KIND[kind])})"
+            )
+        if kind == "risk":
+            sev = node.get("severity", "")
+            if sev not in SEVERITY_VALUES:
+                errors.append(
+                    f"node {nid}: severity {sev!r} not in {sorted(SEVERITY_VALUES)}"
+                )
+        if kind == "ambiguity":
+            for opt in node.get("options") or []:
+                if not isinstance(opt, dict):
+                    errors.append(f"node {nid}: option must be an object, got {opt!r}")
+                    continue
+                oid = opt.get("id", "")
+                if not isinstance(oid, str) or not ID_RE.fullmatch(oid):
+                    errors.append(
+                        f"node {nid}: option id {oid!r} must match [A-Za-z0-9_-]+"
+                    )
     # Anchors in the markdown that don't correspond to any declared node — useful warning.
     for anchor in anchor_counts:
         if anchor not in declared_anchors:
@@ -624,13 +666,15 @@ __SUBMIT__
     card.dataset.kind = node.kind;
     card.dataset.searchText = (node.id + " " + node.title + " " + node.kind).toLowerCase();
 
-    // Head
+    // Head. Enum fields (kind/status/severity) are validated by the Python
+    // renderer, but escape them anyway — daemon pages embed the auth token,
+    // so a renderer-side injection would let a hostile sidecar exfil it.
     const head = document.createElement("div");
     head.className = "head";
     head.innerHTML = `
-      <span class="badge kind-${node.kind}">${node.kind}</span>
-      <span class="badge status status-${node.status}">${node.status}</span>
-      ${node.kind === "risk" ? `<span class="badge sev-${node.severity}">${node.severity} severity</span>` : ""}
+      <span class="badge kind-${escapeHtml(node.kind)}">${escapeHtml(node.kind)}</span>
+      <span class="badge status status-${escapeHtml(node.status)}">${escapeHtml(node.status)}</span>
+      ${node.kind === "risk" ? `<span class="badge sev-${escapeHtml(node.severity)}">${escapeHtml(node.severity)} severity</span>` : ""}
       <span class="id">${escapeHtml(node.id)}</span>
       <h2>${escapeHtml(node.title)}</h2>
     `;
@@ -734,7 +778,7 @@ __SUBMIT__
           ${node.options.map(opt => `
             <li>
               <label>
-                <input type="radio" name="opt-${node.id}" value="${escapeHtml(opt.id)}">
+                <input type="radio" name="opt-${escapeHtml(node.id)}" value="${escapeHtml(opt.id)}">
                 <strong>${escapeHtml(opt.label)}</strong>
                 ${opt.body ? `<div class="opt-body">${escapeHtml(opt.body)}</div>` : ""}
               </label>
@@ -742,7 +786,7 @@ __SUBMIT__
           `).join("")}
           <li>
             <label>
-              <input type="radio" name="opt-${node.id}" value="__freeform__">
+              <input type="radio" name="opt-${escapeHtml(node.id)}" value="__freeform__">
               <strong>Freeform answer</strong>
               <textarea data-role="freeform" placeholder="Write your own answer..." style="margin-top:6px;display:none"></textarea>
             </label>

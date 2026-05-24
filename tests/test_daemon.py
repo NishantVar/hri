@@ -47,8 +47,8 @@ class RiviewDaemonTests(unittest.TestCase):
         self.proc = subprocess.Popen(
             RIVIEW_CLI + ["daemon", "--port", str(self.port)],
             env=self.env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         try:
             _wait_for(self.base + "/")
@@ -223,6 +223,57 @@ class RiviewDaemonTests(unittest.TestCase):
         self.assertTrue(token_file.exists())
         mode = token_file.stat().st_mode & 0o777
         self.assertEqual(mode, 0o600)
+
+
+class RiviewDaemonHostGateTests(unittest.TestCase):
+    """Daemon-startup tests that don't share the long-lived fixture above."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="riview-daemon-host-")
+        self.env = {**os.environ, "RIVIEW_HOME": self.tmp}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_non_loopback_host_requires_unsafe_flag(self):
+        port = _free_port()
+        r = subprocess.run(
+            RIVIEW_CLI + ["daemon", "--host", "0.0.0.0", "--port", str(port)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("refusing to bind", r.stderr)
+        self.assertIn("--unsafe-host", r.stderr)
+
+    def test_token_perms_repaired_on_existing_loose_file(self):
+        # Pre-create a token file with world-readable perms; ensure daemon
+        # startup chmod's it back to 0600.
+        token_file = Path(self.tmp) / "token"
+        token_file.write_text("deadbeef\n")
+        os.chmod(token_file, 0o644)
+        port = _free_port()
+        proc = subprocess.Popen(
+            RIVIEW_CLI + ["daemon", "--port", str(port)],
+            env=self.env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            _wait_for(f"http://127.0.0.1:{port}/")
+            mode = token_file.stat().st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+            # And the existing token value was preserved, not regenerated.
+            self.assertEqual(token_file.read_text().strip(), "deadbeef")
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
 
 if __name__ == "__main__":
