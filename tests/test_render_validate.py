@@ -6,7 +6,7 @@ fields (kind / status / severity / node id) into security boundaries:
 a hostile sidecar with HTML in those fields could otherwise inject
 script and exfil the token.
 
-Run: python3 -m unittest riview.tests.test_render_validate
+Run: python3 -m unittest tests.test_render_validate
 """
 
 import sys

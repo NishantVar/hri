@@ -7,7 +7,7 @@ The data model for interactive spec/plan review. Two files form one logical spec
 
 The default basename is `spec`; pass `--basename mvp` to render/apply scripts to point at `mvp.md` + `mvp.decisions.json`. Multiple basenames can coexist in the same directory.
 
-The applier overwrites `<basename>.md` and `<basename>.decisions.json` in place after each review pass (atomic write: tempfile → fsync → rename, plus a best-effort parent-directory fsync). Each pass bumps `version` and refreshes the `applied_from_review` audit block. Git is the history. Each file is crash-hardened individually; applying a review is not a transaction across the two files, so a crash between them can leave the sidecar bumped while the markdown still reflects the prior version. Re-run `apply.py` against the same review delta to recover.
+The applier overwrites `<basename>.md` and `<basename>.decisions.json` in place after each review pass (atomic write: tempfile → fsync → rename, plus a best-effort parent-directory fsync). Each pass bumps `version` and refreshes the `applied_from_review` audit block. Git is the history. Each file is crash-hardened individually; applying a review is not a transaction across the two files, so a crash between them can leave the sidecar bumped while the markdown still reflects the prior version. Recover via git: restore the pair to a consistent pre-apply state and re-run `apply.py`. See ADR-0006.
 
 ## Markdown anchor convention
 

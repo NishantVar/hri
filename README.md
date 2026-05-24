@@ -42,13 +42,13 @@ python3 scripts/render.py sample
 
 ### Real spec (custom basename)
 
-To review a real spec living next to other docs — for example `habits/design/mvp.md` + `mvp.decisions.json`:
+To review a real spec living next to other docs — for example `path/to/specs/mvp.md` + `mvp.decisions.json`:
 
 ```bash
-python3 riview/scripts/render.py design --basename mvp           # renders design/mvp.html
+python3 scripts/render.py path/to/specs --basename mvp           # renders path/to/specs/mvp.html
 # review in browser, export delta to /tmp/mvp-review.json
-python3 riview/scripts/apply.py design /tmp/mvp-review.json --basename mvp
-python3 riview/scripts/render.py design --basename mvp           # renders design/mvp.html against the updated spec
+python3 scripts/apply.py path/to/specs /tmp/mvp-review.json --basename mvp
+python3 scripts/render.py path/to/specs --basename mvp           # renders against the updated spec
 ```
 
 Each spec dir can hold multiple basenames side by side — `mvp.{md,decisions.json}` and `other.{md,decisions.json}` won't collide. Add a `.gitignore` for the generated `*.html` files; the `.md` + `.decisions.json` pair is the canonical, git-tracked spec.
@@ -126,35 +126,35 @@ submitting a new revision with `--session <id>` after applying the review.
 
 ```bash
 # Register a spec as a new session (prints session_id + URL).
-python3 riview/scripts/riview.py submit design --basename mvp
+python3 scripts/riview.py submit design --basename mvp
 
 # Idempotent re-submit (identical content) returns the existing revision.
 # Changed content advances to revision 2 inside the same session.
-python3 riview/scripts/riview.py submit design --basename mvp --session <id>
+python3 scripts/riview.py submit design --basename mvp --session <id>
 
 # Record a review JSON against the session's current revision.
 # (In slice 1b this happens via the browser; the CLI hook is here for testing.)
-python3 riview/scripts/riview.py submit-review <id> /path/to/review.json
+python3 scripts/riview.py submit-review <id> /path/to/review.json
 
 # Print the latest review for the current revision (exits 4 if none).
-python3 riview/scripts/riview.py pull <id>
+python3 scripts/riview.py pull <id>
 
 # Block until the next event arrives (new revision or new/updated review).
 # Defaults to tail-f: --since = current event_seq. Pass --since 0 to replay.
 # --timeout 0 means wait indefinitely (default 0). Daemon must be running.
-python3 riview/scripts/riview.py wait <id>
-python3 riview/scripts/riview.py wait <id> --since 3 --timeout 30
+python3 scripts/riview.py wait <id>
+python3 scripts/riview.py wait <id> --since 3 --timeout 30
 
 # Mark a session as applied (after the agent applies a pulled review).
-python3 riview/scripts/riview.py applied <id>
+python3 scripts/riview.py applied <id>
 
 # List open sessions across all projects (--all includes closed).
-python3 riview/scripts/riview.py list
+python3 scripts/riview.py list
 
 # Show full meta.json, print the daemon URL, or close the session.
-python3 riview/scripts/riview.py status <id>
-python3 riview/scripts/riview.py open <id>
-python3 riview/scripts/riview.py dismiss <id>
+python3 scripts/riview.py status <id>
+python3 scripts/riview.py open <id>
+python3 scripts/riview.py dismiss <id>
 ```
 
 Exit codes: `0` ok, `2` bad input, `3` session not found, `4` no review for current revision, `5` daemon unreachable.
@@ -164,8 +164,8 @@ Exit codes: `0` ok, `2` bad input, `3` session not found, `4` no review for curr
 A small HTTP daemon serves a browser review UI and accepts review POSTs:
 
 ```bash
-python3 riview/scripts/riview.py daemon                    # 127.0.0.1:7891
-python3 riview/scripts/riview.py daemon --port 7900        # custom port
+python3 scripts/riview.py daemon                    # 127.0.0.1:7891
+python3 scripts/riview.py daemon --port 7900        # custom port
 ```
 
 By default the daemon refuses to bind anything other than loopback
@@ -224,26 +224,26 @@ Browser UI behavior:
 Smoke tests:
 
 ```bash
-python3 -m unittest riview.tests.test_session          # CLI / session model
-python3 -m unittest riview.tests.test_daemon           # HTTP daemon end-to-end
-python3 -m unittest riview.tests.test_render_validate  # renderer input hardening
+python3 -m unittest tests.test_session          # CLI / session model
+python3 -m unittest tests.test_daemon           # HTTP daemon end-to-end
+python3 -m unittest tests.test_render_validate  # renderer input hardening
 ```
 
 ## Design choices
 
 - **Anchors are HTML comments.** Invisible when rendered as markdown by any other tool. Surgical body edits possible without touching unrelated text. Comment-only edits guaranteed.
 - **The renderer is one file.** Self-contained HTML — inline CSS, inline JS, no CDN. Works offline, prints sensibly, respects dark mode.
-- **The applier is non-destructive.** New rev files, never overwrites. Each rev metadata back-references the review JSON that produced it.
+- **The applier overwrites in place.** Each apply pass bumps `version` on the sidecar and records `applied_from_review` (the consumed delta path, touched anchors, timestamp). Git is the per-revision history — see ADR-0003.
 - **Determinism over polish.** Review deltas sort `reviews[]` by `node_id`. Anchor blocks are rewritten with minimal whitespace churn. Stable IDs are the contract; everything else is a render concern.
 - **No spatial graph view.** Cards are linear, real DOM. A spatial/zoomable variant (react-flow, tldraw, or HTML-in-Canvas) is a v2 swap on the same data model — out of MVP scope.
 
 ## Limitations / explicit non-goals (MVP)
 
-- No live file watcher; review delivery is copy/paste or file save.
+- No live source-file watcher; review delivery is export/download or daemon POST.
 - No multi-user merge — one reviewer at a time.
 - No freeform ink/handwriting capture.
 - No automated source-spec re-generation; the applier mutates the structured graph + body anchors but doesn't re-run the authoring agent.
-- Only the most recent `review` per node is preserved across revs. `apply.py` overwrites `node.review` each pass; older review history lives in the prior rev files. A `review_history[]` extension would be a schema-level addition.
+- Only the most recent `review` per node is preserved in the sidecar. `apply.py` overwrites `node.review` each pass; older review history lives in git history. A `review_history[]` extension would be a schema-level addition.
 
 ## Files
 
@@ -251,7 +251,7 @@ python3 -m unittest riview.tests.test_render_validate  # renderer input hardenin
 |---------------------------------------|--------------------------------------------------|
 | `SCHEMA.md`                           | Data-model reference                             |
 | `scripts/render.py`                   | Spec → interactive HTML                          |
-| `scripts/apply.py`                    | Review delta → `spec.rev<N>.*`                   |
+| `scripts/apply.py`                    | Review delta → in-place `<basename>.{md,decisions.json}` update |
 | `scripts/riview.py`                   | Session inbox CLI (`submit/list/pull/...`)       |
 | `tests/test_session.py`               | Smoke tests for the session model                |
 | `sample/spec.md`                      | Demo: Pomodoro Timer MVP, markdown view          |

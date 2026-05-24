@@ -1,7 +1,7 @@
-"""Smoke tests for riview/scripts/riview.py session model.
+"""Smoke tests for scripts/riview.py session model.
 
-Run from the repo root: python3 -m unittest riview.tests.test_session
-Or directly:           python3 riview/tests/test_session.py
+Run from the repo root: python3 -m unittest tests.test_session
+Or directly:           python3 tests/test_session.py
 """
 
 import json
@@ -13,9 +13,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-RIVIEW_CLI = [sys.executable, str(REPO_ROOT / "riview" / "scripts" / "riview.py")]
-SAMPLE = REPO_ROOT / "riview" / "sample"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+RIVIEW_CLI = [sys.executable, str(REPO_ROOT / "scripts" / "riview.py")]
+SAMPLE = REPO_ROOT / "sample"
 
 
 class RiviewSessionTests(unittest.TestCase):
