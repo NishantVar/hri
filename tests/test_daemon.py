@@ -780,9 +780,10 @@ class RiviewDaemonTests(unittest.TestCase):
 
     def test_session_page_renders_overlay_status_and_comment(self):
         # Slice 1: after a review POST, reloading the session page must reflect
-        # the submitted status + body_edit in the rendered SPEC, and surface
-        # the comment in the overlay-comments JSON island so the textarea
-        # re-prefills on reload.
+        # the submitted status + body_edit in the rendered SPEC, and the full
+        # overlay entries must surface in the overlay-entries JSON island so
+        # the textarea re-prefills and the client can compose full entries on
+        # partial-field edits.
         sid = self._submit_sample()
         self._post_review(sid, {
             "spec_id": "pomodoro-mvp",
@@ -797,14 +798,18 @@ class RiviewDaemonTests(unittest.TestCase):
         })
         body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
 
-        # Overlay-comments JSON island present and includes both comments.
-        marker = '<script type="application/json" id="overlay-comments">'
+        # Overlay-entries JSON island present and carries the full entries
+        # (not just comments) so the client can preserve unchanged fields.
+        marker = '<script type="application/json" id="overlay-entries">'
         self.assertIn(marker, body)
         start = body.index(marker) + len(marker)
         end = body.index("</script>", start)
         overlay = json.loads(body[start:end])
-        self.assertEqual(overlay.get("deci-platform"), "Locked in.")
-        self.assertEqual(overlay.get("amb-sync"), "Local-only for v1.")
+        self.assertEqual(overlay["deci-platform"]["comment"], "Locked in.")
+        self.assertEqual(overlay["deci-platform"]["new_status"], "confirmed")
+        self.assertEqual(overlay["deci-platform"]["body_edit"], "REVIEWED-BODY-MARK")
+        self.assertEqual(overlay["amb-sync"]["comment"], "Local-only for v1.")
+        self.assertEqual(overlay["amb-sync"]["resolution"], {"choice_id": "local"})
 
         # Spec payload reflects the merged status / resolution / body.
         spec_marker = '<script type="application/json" id="spec-payload">'
@@ -821,10 +826,10 @@ class RiviewDaemonTests(unittest.TestCase):
 
     def test_session_page_with_no_overlay_renders_empty_overlay_comments(self):
         # Fresh session, no review.json on disk. Render must not error, and
-        # the overlay-comments island must be the empty object.
+        # the overlay-entries island must be the empty object.
         sid = self._submit_sample()
         body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
-        marker = '<script type="application/json" id="overlay-comments">'
+        marker = '<script type="application/json" id="overlay-entries">'
         self.assertIn(marker, body)
         start = body.index(marker) + len(marker)
         end = body.index("</script>", start)
@@ -832,6 +837,61 @@ class RiviewDaemonTests(unittest.TestCase):
         # No overlay file should have been materialized just from rendering.
         overlay_path = Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json"
         self.assertFalse(overlay_path.exists())
+
+    def test_partial_field_resubmit_preserves_other_overlay_fields(self):
+        # Regression: the daemon's by-node-id replace-merge will drop any
+        # field that's missing from a re-submitted entry. The renderer must
+        # therefore emit FULL effective overlay entries, not sparse diffs —
+        # and the daemon's overlay-entries island must carry every field
+        # needed to recompose them. Simulate the client behavior here by
+        # POSTing the composed full entry; assert that status / resolution /
+        # body_edit survive a comment-only edit.
+        sid = self._submit_sample()
+        # 1) Initial submit: full state for one node.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "body_edit": "BODY-V1", "comment": "Locked in."},
+            ],
+        })
+        # 2) Reload and read the overlay-entries island as the client would.
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        marker = '<script type="application/json" id="overlay-entries">'
+        s = body.index(marker) + len(marker)
+        e = body.index("</script>", s)
+        overlay = json.loads(body[s:e])
+        existing = overlay["deci-platform"]
+        # 3) Compose a full entry mirroring buildEntryForNode's behavior:
+        # only the comment changed, but the client preserves new_status /
+        # body_edit from the existing overlay so the merge does not drop them.
+        composed = dict(existing)
+        composed["comment"] = "Actually v2"
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [composed],
+        })
+        # 4) On the next render, the merged spec must STILL reflect the
+        # original status + body_edit. Without the full-entry contract, the
+        # replace-merge would have stored only {comment: ...} and the status
+        # would have reverted to canonical here.
+        body2 = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        sm = '<script type="application/json" id="spec-payload">'
+        s2 = body2.index(sm) + len(sm)
+        e2 = body2.index("</script>", s2)
+        spec_payload = json.loads(body2[s2:e2])
+        nodes_by_id = {n["id"]: n for n in spec_payload["nodes"]}
+        self.assertEqual(nodes_by_id["deci-platform"]["status"], "confirmed")
+        self.assertIn("BODY-V1", nodes_by_id["deci-platform"]["_body_md"])
+        # Overlay-entries island carries the new comment plus all preserved fields.
+        o2_start = body2.index(marker) + len(marker)
+        o2_end = body2.index("</script>", o2_start)
+        overlay2 = json.loads(body2[o2_start:o2_end])
+        self.assertEqual(overlay2["deci-platform"]["comment"], "Actually v2")
+        self.assertEqual(overlay2["deci-platform"]["new_status"], "confirmed")
+        self.assertEqual(overlay2["deci-platform"]["body_edit"], "BODY-V1")
 
     def test_overlay_does_not_persist_into_node_review_comment(self):
         # ADR-0011: overlay comments are a separate baseline. They must NOT

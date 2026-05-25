@@ -224,7 +224,7 @@ def build_html(
     submit_token: str = "",
     session_id: str | None = None,
     base_revision: int | None = None,
-    overlay_comments: dict[str, str] | None = None,
+    overlay_entries: dict[str, dict] | None = None,
 ) -> str:
     ordered = topo_order(spec["nodes"])
     affects = compute_affects(spec["nodes"])
@@ -258,14 +258,14 @@ def build_html(
         "base_revision": base_revision,
     })
     submit_payload = submit_payload.replace("</", "<\\/")
-    overlay_payload = json.dumps(overlay_comments or {})
+    overlay_payload = json.dumps(overlay_entries or {})
     overlay_payload = overlay_payload.replace("</", "<\\/")
     return TEMPLATE.replace("__TITLE__", title) \
         .replace("__SPEC_ID__", spec_id) \
         .replace("__VERSION__", str(spec["version"])) \
         .replace("__PAYLOAD__", payload_json) \
         .replace("__SUBMIT__", submit_payload) \
-        .replace("__OVERLAY_COMMENTS__", overlay_payload) \
+        .replace("__OVERLAY_ENTRIES__", overlay_payload) \
         .replace("__GENERATED_AT__", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
@@ -836,21 +836,25 @@ __PAYLOAD__
 <script type="application/json" id="submit-config">
 __SUBMIT__
 </script>
-<script type="application/json" id="overlay-comments">
-__OVERLAY_COMMENTS__
+<script type="application/json" id="overlay-entries">
+__OVERLAY_ENTRIES__
 </script>
 
 <script>
 (function() {
   const SPEC = JSON.parse(document.getElementById("spec-payload").textContent);
-  // Slice 1: per-node comment baseline from the daemon's submitted overlay.
-  // Comments are tracked as a separate baseline (not merged into
-  // node.review.comment) so reload-prefill works without rewriting the
-  // applier's invariants. Empty {} on standalone render.
-  let OVERLAY_COMMENTS = {};
+  // Slice 1: per-node overlay entries from the daemon's submitted review.json.
+  // Used to (a) baseline the comment textarea for reload-prefill, and (b)
+  // compose full effective entries on partial-field edits so the daemon's
+  // by-node-id replace-merge cannot silently drop other already-submitted
+  // overlay fields (status / resolution / body_edit). Empty {} on standalone
+  // render. The variable is `let` because successful submits advance it in
+  // place so a follow-up edit on the same page composes against the new
+  // overlay, not the page-load snapshot.
+  let OVERLAY_BY_ID = {};
   try {
-    OVERLAY_COMMENTS = JSON.parse(document.getElementById("overlay-comments").textContent) || {};
-  } catch (_) { OVERLAY_COMMENTS = {}; }
+    OVERLAY_BY_ID = JSON.parse(document.getElementById("overlay-entries").textContent) || {};
+  } catch (_) { OVERLAY_BY_ID = {}; }
 
   // Status dropdown options. Every status from the node's enum is selectable
   // so the form can pre-fill to the current applied status (slice 2). The
@@ -892,7 +896,8 @@ __OVERLAY_COMMENTS__
   // look touched and Submit-all would re-POST the entire spec.
   const APPLIED_BY_ID = {};
   SPEC.nodes.forEach(n => {
-    const overlayComment = OVERLAY_COMMENTS[n.id];
+    const overlay = OVERLAY_BY_ID[n.id] || {};
+    const overlayComment = overlay.comment;
     APPLIED_BY_ID[n.id] = {
       status: n.status,
       comment: typeof overlayComment === "string" ? overlayComment : "",
@@ -1258,8 +1263,11 @@ __OVERLAY_COMMENTS__
           } else {
             cardStatusEl.textContent = "Submitted (rev " + (data.current_revision || data.revision || "?") + ", " + (data.review_count || 1) + " on server)";
             cardStatusEl.classList.add("ok");
-            // Slice 3: clear the just-submitted entry from state + storage so
-            // a reload doesn't re-show it as an unsubmitted draft.
+            // Advance the in-memory baseline so the form reflects what is
+            // now on the server. Without this, resetNodeStateToApplied below
+            // would snap the form back to the page-load baseline, briefly
+            // hiding the accepted edit until the next reload.
+            advanceBaselineFromEntry(entry);
             resetNodeStateToApplied(node.id);
             resyncCardDom(node.id);
             saveDraft();
@@ -1413,31 +1421,51 @@ __OVERLAY_COMMENTS__
     const appliedComment = (applied.comment || "").trim();
     const commentDiff = trimmedComment !== appliedComment;
     const resolutionDiff = !resolutionsEqual(s.resolution, applied.resolution);
-    // Slice 1+2: no-diff entries are dropped client-side before POST. Comment
-    // diff is measured against the overlay baseline so a reload-prefilled
-    // comment doesn't get re-submitted as a fresh edit.
-    if (!statusDiff && !commentDiff && !resolutionDiff) return null;
-    // Validity check: if the effective status (post-change) is "resolved" for
-    // an ambiguity, a valid resolution must be present in state.
-    const effectiveStatus = statusDiff ? s.new_status : applied.status;
-    if (n.kind === "ambiguity" && effectiveStatus === "resolved") {
+    // Touched check — no-op if state matches the merged baseline.
+    if (!statusDiff && !commentDiff && !resolutionDiff && !s.body_edit) return null;
+    // Validity: ambiguity with effective status "resolved" needs a resolution.
+    if (n.kind === "ambiguity" && s.new_status === "resolved") {
       const hasValidResolution = s.resolution && (
         (s.resolution.choice_id) ||
         (s.resolution.freeform && s.resolution.freeform.trim())
       );
       if (!hasValidResolution) return "invalid";
     }
+    // Compose a FULL effective overlay entry. The daemon's same-revision
+    // merge replaces the prior entry by node_id, so a sparse diff would
+    // silently drop other already-submitted overlay fields. Start from the
+    // existing overlay entry, then layer the user's changes on top. Fields
+    // the user did not touch are carried through from OVERLAY_BY_ID.
+    const existing = OVERLAY_BY_ID[n.id] || {};
     const entry = { node_id: n.id };
-    if (statusDiff) entry.new_status = s.new_status;
-    if (resolutionDiff && s.resolution) {
-      const r = {};
-      if (s.resolution.choice_id) r.choice_id = s.resolution.choice_id;
-      if (s.resolution.freeform && s.resolution.freeform.trim()) {
-        r.freeform = s.resolution.freeform.trim();
-      }
-      if (Object.keys(r).length > 0) entry.resolution = r;
+    // new_status: user's value if they changed it, else preserve existing.
+    if (statusDiff) {
+      entry.new_status = s.new_status;
+    } else if (typeof existing.new_status === "string" && existing.new_status) {
+      entry.new_status = existing.new_status;
     }
-    if (commentDiff) entry.comment = trimmedComment;
+    // resolution: user's value if changed; else preserve existing.
+    if (resolutionDiff) {
+      if (s.resolution) {
+        const r = {};
+        if (s.resolution.choice_id) r.choice_id = s.resolution.choice_id;
+        if (s.resolution.freeform && s.resolution.freeform.trim()) {
+          r.freeform = s.resolution.freeform.trim();
+        }
+        if (Object.keys(r).length > 0) entry.resolution = r;
+      }
+    } else if (existing.resolution && typeof existing.resolution === "object") {
+      entry.resolution = existing.resolution;
+    }
+    // body_edit: user's value if they edited; else preserve existing.
+    if (s.body_edit) {
+      entry.body_edit = s.body_edit;
+    } else if (typeof existing.body_edit === "string") {
+      entry.body_edit = existing.body_edit;
+    }
+    // comment: state value is canonical here. Empty comment intentionally
+    // clears the overlay's prior comment (user explicitly emptied the box).
+    if (trimmedComment) entry.comment = trimmedComment;
     return entry;
   }
 
@@ -1589,6 +1617,30 @@ __OVERLAY_COMMENTS__
       ? { choice_id: applied.resolution.choice_id,
           freeform: applied.resolution.freeform }
       : null;
+  }
+  // Slice 1: after the daemon accepts a submitted entry, advance the
+  // in-memory overlay + applied baselines so subsequent edits on this page
+  // compose against the new server state, not against the page-load
+  // snapshot. The submitted `entry` is the full effective overlay entry
+  // (see buildEntryForNode), so we can use it directly as the new
+  // OVERLAY_BY_ID[nid].
+  function advanceBaselineFromEntry(entry) {
+    if (!entry || typeof entry !== "object" || !entry.node_id) return;
+    const nid = entry.node_id;
+    OVERLAY_BY_ID[nid] = entry;
+    const applied = APPLIED_BY_ID[nid];
+    if (!applied) return;
+    if (typeof entry.new_status === "string" && entry.new_status) {
+      applied.status = entry.new_status;
+      STATUS_BY_ID[nid] = entry.new_status;
+    }
+    if (entry.resolution && typeof entry.resolution === "object") {
+      applied.resolution = {
+        choice_id: entry.resolution.choice_id || null,
+        freeform: entry.resolution.freeform || null,
+      };
+    }
+    applied.comment = typeof entry.comment === "string" ? entry.comment : "";
   }
   function resyncCardDom(nid) {
     const card = document.getElementById("card-" + nid);
@@ -1743,7 +1795,10 @@ __OVERLAY_COMMENTS__
             // landed unless the call errored.
             built.delta.reviews.forEach(r => acceptedIds.add(r.node_id));
           }
+          const entryByNodeId = {};
+          built.delta.reviews.forEach(r => { entryByNodeId[r.node_id] = r; });
           acceptedIds.forEach(nid => {
+            advanceBaselineFromEntry(entryByNodeId[nid]);
             resetNodeStateToApplied(nid);
             resyncCardDom(nid);
           });

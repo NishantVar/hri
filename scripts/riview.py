@@ -863,7 +863,7 @@ def _render_session_html(
         return HTTPStatus.CONFLICT, _render_invalid_session_html(sid, errors)
     md_text = md_bytes.decode("utf-8")
     bodies = render.parse_anchored_bodies(md_text)
-    overlay_comments = _apply_overlay_to_spec(sid, cur, spec, bodies)
+    overlay_entries = _apply_overlay_to_spec(sid, cur, spec, bodies)
     return HTTPStatus.OK, render.build_html(
         spec,
         bodies,
@@ -871,21 +871,24 @@ def _render_session_html(
         submit_token=submit_token,
         session_id=sid,
         base_revision=cur,
-        overlay_comments=overlay_comments,
+        overlay_entries=overlay_entries,
     )
 
 
 def _apply_overlay_to_spec(
     sid: str, cur: int, spec: dict, bodies: dict[str, str]
-) -> dict[str, str]:
+) -> dict[str, dict]:
     """Merge the current revision's submitted review (the website's overlay)
     into the in-memory spec + bodies before render.
 
     Status, resolution, and body_edit fields land on the node / bodies dicts
-    directly so the renderer's existing prefill picks them up. Comments are
-    returned separately so they prefill the textarea baseline without leaking
-    into `node.review.comment` — see ADR-0011 for why canonical prior-cycle
-    comments must not invite stale resubmission.
+    directly so the renderer's existing prefill picks them up. The full per-
+    node overlay entries are also returned to the renderer so the client can
+    emit complete entries on partial-field edits — without that, the daemon's
+    by-node-id replace-merge would silently drop other already-submitted
+    overlay fields (ADR-0011). Comments are tracked as part of the overlay
+    entry; they prefill the textarea baseline without leaking into
+    `node.review.comment` on the stored sidecar.
     """
     overlay_path = session_dir(sid) / "reviews" / str(cur) / "review.json"
     if not overlay_path.exists():
@@ -902,7 +905,7 @@ def _apply_overlay_to_spec(
         return {}
     node_by_id = {n["id"]: n for n in nodes if isinstance(n, dict) and "id" in n}
 
-    overlay_comments: dict[str, str] = {}
+    overlay_entries: dict[str, dict] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -912,6 +915,7 @@ def _apply_overlay_to_spec(
         node = node_by_id.get(nid)
         if node is None:
             continue
+        overlay_entries[nid] = entry
         new_status = entry.get("new_status")
         if isinstance(new_status, str) and new_status:
             node["status"] = new_status
@@ -923,10 +927,7 @@ def _apply_overlay_to_spec(
             anchor = node.get("source_anchor", nid)
             if isinstance(anchor, str):
                 bodies[anchor] = body_edit
-        comment = entry.get("comment")
-        if isinstance(comment, str):
-            overlay_comments[nid] = comment
-    return overlay_comments
+    return overlay_entries
 
 
 def _render_invalid_session_html(sid: str, errors: list[str]) -> str:
