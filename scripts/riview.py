@@ -425,6 +425,35 @@ class ReviewError(Exception):
         self.http_status = http_status
 
 
+def _apply_clears_to_existing(
+    existing_entry: dict | None, incoming: dict
+) -> dict | None:
+    """Compose the post-clear entry for the overlay merge path.
+
+    The client signals "drop these fields from the existing overlay entry"
+    by passing `cleared_fields: [...]`. We compute the merged entry as
+    `(existing - cleared) ∪ incoming_non_clear_fields`. If only `node_id`
+    remains, the node is fully evicted from the overlay (return None).
+    """
+    cleared = incoming.get("cleared_fields")
+    if not isinstance(cleared, list):
+        return None
+    base = dict(existing_entry) if isinstance(existing_entry, dict) else {
+        "node_id": incoming["node_id"]
+    }
+    base["node_id"] = incoming["node_id"]
+    for field in cleared:
+        if isinstance(field, str):
+            base.pop(field, None)
+    for key, value in incoming.items():
+        if key in ("cleared_fields", "node_id"):
+            continue
+        base[key] = value
+    if set(base.keys()) <= {"node_id"}:
+        return None  # signals deletion from the overlay
+    return base
+
+
 def _merge_reviews_by_node_id(
     existing: list[dict], incoming: list[dict]
 ) -> list[dict]:
@@ -432,13 +461,28 @@ def _merge_reviews_by_node_id(
 
     Later entries (incoming) win on conflict. Order within the result is
     deterministic (sorted by node_id) so concurrent writers converge.
+
+    Entries carrying `cleared_fields: [...]` apply as a field-level diff
+    instead of a full replace: those fields are removed from the prior
+    entry. If the merged result has only `node_id` left, the node is
+    evicted from the overlay entirely — that's how the client says "delete
+    my overlay entry for this node" when the only content was a comment
+    the user just cleared.
     """
     by_id: dict[str, dict] = {}
     for entry in existing:
         if isinstance(entry, dict) and isinstance(entry.get("node_id"), str):
             by_id[entry["node_id"]] = entry
     for entry in incoming:
-        by_id[entry["node_id"]] = entry
+        nid = entry["node_id"]
+        if entry.get("cleared_fields"):
+            merged = _apply_clears_to_existing(by_id.get(nid), entry)
+            if merged is None:
+                by_id.pop(nid, None)
+            else:
+                by_id[nid] = merged
+        else:
+            by_id[nid] = entry
     return sorted(by_id.values(), key=lambda e: e["node_id"])
 
 
@@ -608,9 +652,12 @@ def record_review_for_session(
 
         # Drop entries whose only field is node_id — they would silently clobber
         # a prior real review for the same node on merge. Schema rule: "Entries
-        # with all fields null/empty are dropped silently."
+        # with all fields null/empty are dropped silently." Entries carrying a
+        # `cleared_fields` marker are intentional overlay-deletion signals
+        # (ADR-0011) and pass through even when otherwise empty.
         filtered_incoming = [
-            entry for entry in incoming_reviews if not apply_mod.is_empty_entry(entry)
+            entry for entry in incoming_reviews
+            if not apply_mod.is_empty_entry(entry) or entry.get("cleared_fields")
         ]
 
         # Per-node staleness split. CLI path (no base_revision) accepts everything.

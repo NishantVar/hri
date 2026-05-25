@@ -1466,6 +1466,24 @@ __OVERLAY_ENTRIES__
     // comment: state value is canonical here. Empty comment intentionally
     // clears the overlay's prior comment (user explicitly emptied the box).
     if (trimmedComment) entry.comment = trimmedComment;
+    // If the composed entry has no meaningful fields but there IS an
+    // existing overlay entry for this node, the user effectively cleared
+    // the overlay (e.g. cleared a comment-only entry). The daemon's
+    // empty-entry filter would otherwise drop this submit and the stale
+    // overlay comment would survive on reload. Carry an explicit
+    // `cleared_fields` marker so the daemon's overlay merge path knows to
+    // evict the node (ADR-0011).
+    const meaningfulKeys = ["new_status", "resolution", "body_edit", "comment"];
+    const isEmpty = !meaningfulKeys.some(k => entry[k] !== undefined);
+    if (isEmpty) {
+      const existingKeys = Object.keys(existing).filter(k => k !== "node_id");
+      if (existingKeys.length > 0) {
+        entry.cleared_fields = existingKeys;
+      } else {
+        // No overlay existed and no meaningful diff produced — nothing to submit.
+        return null;
+      }
+    }
     return entry;
   }
 
@@ -1622,25 +1640,59 @@ __OVERLAY_ENTRIES__
   // in-memory overlay + applied baselines so subsequent edits on this page
   // compose against the new server state, not against the page-load
   // snapshot. The submitted `entry` is the full effective overlay entry
-  // (see buildEntryForNode), so we can use it directly as the new
-  // OVERLAY_BY_ID[nid].
+  // (see buildEntryForNode); apply the same field-clear semantics here
+  // that the daemon uses on disk so the page stays consistent without a
+  // reload.
   function advanceBaselineFromEntry(entry) {
     if (!entry || typeof entry !== "object" || !entry.node_id) return;
     const nid = entry.node_id;
-    OVERLAY_BY_ID[nid] = entry;
+    const node = SPEC.nodes.find(x => x.id === nid);
+    const cleared = Array.isArray(entry.cleared_fields) ? entry.cleared_fields : [];
+    if (cleared.length > 0) {
+      const prior = OVERLAY_BY_ID[nid] || {};
+      const merged = Object.assign({}, prior);
+      cleared.forEach(f => { delete merged[f]; });
+      ["new_status", "resolution", "body_edit", "comment"].forEach(f => {
+        if (entry[f] !== undefined) merged[f] = entry[f];
+      });
+      const meaningfulKeys = Object.keys(merged).filter(k => k !== "node_id");
+      if (meaningfulKeys.length === 0) {
+        delete OVERLAY_BY_ID[nid];
+      } else {
+        merged.node_id = nid;
+        OVERLAY_BY_ID[nid] = merged;
+      }
+    } else {
+      OVERLAY_BY_ID[nid] = entry;
+    }
     const applied = APPLIED_BY_ID[nid];
     if (!applied) return;
-    if (typeof entry.new_status === "string" && entry.new_status) {
-      applied.status = entry.new_status;
-      STATUS_BY_ID[nid] = entry.new_status;
+    const newOverlay = OVERLAY_BY_ID[nid];
+    // Status: overlay value wins, else canonical (the SPEC payload's status
+    // is the merged-overlay-at-render value, so we re-read canonical from
+    // the prior STATUS_BY_ID when the overlay clears it... but STATUS_BY_ID
+    // also reflects render-time merge. The pragmatic anchor: if the new
+    // overlay drops new_status, the node's "canonical" view is what the
+    // server would render next time with this overlay — which is canonical.
+    // We don't have canonical in JS, so fall back to leaving status alone
+    // when the overlay clears it. On the next reload the page rebases.).
+    if (newOverlay && typeof newOverlay.new_status === "string" && newOverlay.new_status) {
+      applied.status = newOverlay.new_status;
+      STATUS_BY_ID[nid] = newOverlay.new_status;
     }
-    if (entry.resolution && typeof entry.resolution === "object") {
+    if (newOverlay && newOverlay.resolution && typeof newOverlay.resolution === "object") {
       applied.resolution = {
-        choice_id: entry.resolution.choice_id || null,
-        freeform: entry.resolution.freeform || null,
+        choice_id: newOverlay.resolution.choice_id || null,
+        freeform: newOverlay.resolution.freeform || null,
       };
+    } else if (node && node.kind === "ambiguity") {
+      // Overlay no longer carries a resolution. Without canonical, the
+      // safe page-local advance is to clear it; reload will re-baseline
+      // from the spec on disk.
+      applied.resolution = null;
     }
-    applied.comment = typeof entry.comment === "string" ? entry.comment : "";
+    applied.comment = (newOverlay && typeof newOverlay.comment === "string")
+      ? newOverlay.comment : "";
   }
   function resyncCardDom(nid) {
     const card = document.getElementById("card-" + nid);

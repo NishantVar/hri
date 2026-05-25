@@ -893,6 +893,76 @@ class RiviewDaemonTests(unittest.TestCase):
         self.assertEqual(overlay2["deci-platform"]["new_status"], "confirmed")
         self.assertEqual(overlay2["deci-platform"]["body_edit"], "BODY-V1")
 
+    def test_clear_comment_only_overlay_evicts_node_via_cleared_fields(self):
+        # Regression: with the daemon's empty-entry filter, a comment-only
+        # overlay entry could not be cleared by sending {node_id} alone —
+        # the filter would drop the submit and the stale comment would
+        # survive on reload. The client's compose path emits an explicit
+        # `cleared_fields: ["comment"]` marker in that case; the daemon's
+        # overlay merge applies it as a field-level diff and evicts the
+        # node when only `node_id` remains.
+        sid = self._submit_sample()
+        # 1) Submit a comment-only overlay entry.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "comment": "draft note"},
+            ],
+        })
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        marker = '<script type="application/json" id="overlay-entries">'
+        s = body.index(marker) + len(marker)
+        e = body.index("</script>", s)
+        overlay = json.loads(body[s:e])
+        self.assertEqual(overlay["deci-platform"]["comment"], "draft note")
+        # 2) Submit the cleared_fields marker the client would emit.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "cleared_fields": ["comment"]},
+            ],
+        })
+        # 3) Overlay is gone for this node, and the stored review.json no
+        # longer carries an entry for it.
+        body2 = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        s2 = body2.index(marker) + len(marker)
+        e2 = body2.index("</script>", s2)
+        overlay2 = json.loads(body2[s2:e2])
+        self.assertNotIn("deci-platform", overlay2)
+        stored = json.loads((Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json").read_text("utf-8"))
+        ids = [r["node_id"] for r in stored.get("reviews") or []]
+        self.assertNotIn("deci-platform", ids)
+
+    def test_cleared_fields_with_other_fields_drops_only_listed(self):
+        # When the overlay had multiple fields and only one is cleared, the
+        # remaining fields stay. (This path is exercised by the client when
+        # the composed entry still has meaningful content — `cleared_fields`
+        # in that case lets the server preserve the rest.)
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "comment": "Locked in."},
+            ],
+        })
+        # Drop the comment field via the marker; keep new_status implicitly.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "cleared_fields": ["comment"]},
+            ],
+        })
+        stored = json.loads((Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json").read_text("utf-8"))
+        plat = next(r for r in stored["reviews"] if r["node_id"] == "deci-platform")
+        self.assertEqual(plat.get("new_status"), "confirmed")
+        self.assertNotIn("comment", plat)
+        self.assertNotIn("cleared_fields", plat)
+
     def test_overlay_does_not_persist_into_node_review_comment(self):
         # ADR-0011: overlay comments are a separate baseline. They must NOT
         # be written into node.review.comment on the stored revision sidecar,
