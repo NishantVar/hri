@@ -994,6 +994,138 @@ class RiviewDaemonTests(unittest.TestCase):
                 urllib.request.urlopen(req).read()
             self.assertEqual(cm.exception.code, 400)
 
+    def test_session_page_emits_canonical_by_id_island(self):
+        # ADR-0011 amendment: the renderer exposes canonical (pre-overlay)
+        # node status + ambiguity resolution as a JSON island parallel to
+        # `overlay-entries`. The client uses it to detect snap-back-to-
+        # canonical and route the diff into `cleared_fields` so the
+        # daemon's overlay merge evicts the node instead of keeping a
+        # no-op entry. STATUS_BY_ID on the page is post-merge so it
+        # cannot serve this role.
+        sid = self._submit_sample()
+        canonical_marker = '<script type="application/json" id="canonical-by-id">'
+        overlay_marker = '<script type="application/json" id="overlay-entries">'
+
+        # (a) Fresh session, no overlay: island carries canonical statuses
+        # for every node (and resolution=null for the ambiguity nodes).
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        self.assertIn(canonical_marker, body)
+        s = body.index(canonical_marker) + len(canonical_marker)
+        e = body.index("</script>", s)
+        canon = json.loads(body[s:e])
+        self.assertEqual(canon["amb-streaks"]["status"], "open")
+        self.assertIsNone(canon["amb-streaks"]["resolution"])
+        self.assertEqual(canon["deci-platform"]["status"], "ai-confident")
+        self.assertNotIn("resolution", canon["deci-platform"])  # non-ambiguity
+        self.assertEqual(canon["risk-bg"]["status"], "open")
+        self.assertNotIn("resolution", canon["risk-bg"])
+
+        # (b) POST a review that flips the ambiguity to resolved. After
+        # reload, canonical-by-id MUST still carry "open" for that node
+        # — this is the bug the fix targets. (overlay-entries correctly
+        # reflects the merged value, but canonical should not leak.)
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "amb-streaks", "new_status": "resolved",
+                 "resolution": {"choice_id": "first-class"},
+                 "comment": "A5"},
+            ],
+        })
+        body2 = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        s = body2.index(canonical_marker) + len(canonical_marker)
+        e = body2.index("</script>", s)
+        canon2 = json.loads(body2[s:e])
+        self.assertEqual(canon2["amb-streaks"]["status"], "open",
+                         "canonical-by-id must show canonical, not overlay-merged status")
+        self.assertIsNone(canon2["amb-streaks"]["resolution"],
+                          "canonical resolution for an unresolved ambiguity is null")
+        # Sanity: overlay-entries DOES reflect the overlay (separation of concerns).
+        s = body2.index(overlay_marker) + len(overlay_marker)
+        e = body2.index("</script>", s)
+        overlay = json.loads(body2[s:e])
+        self.assertEqual(overlay["amb-streaks"]["new_status"], "resolved")
+
+    def test_standalone_render_emits_empty_canonical_by_id_island(self):
+        # Standalone (non-daemon) render via scripts/render.py main(): no
+        # overlay merge ever happens, so canonical-by-id is the empty
+        # object. The client falls back to `n.status` (which IS canonical
+        # in standalone mode) when the island is empty.
+        with tempfile.TemporaryDirectory(prefix="riview-standalone-") as td:
+            spec_dir = Path(td)
+            shutil.copy(SAMPLE / "spec.md", spec_dir / "spec.md")
+            shutil.copy(SAMPLE / "spec.decisions.json", spec_dir / "spec.decisions.json")
+            subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts" / "render.py"), str(spec_dir)],
+                capture_output=True, text=True, check=True,
+            )
+            html = (spec_dir / "spec.html").read_text("utf-8")
+        marker = '<script type="application/json" id="canonical-by-id">'
+        self.assertIn(marker, html)
+        s = html.index(marker) + len(marker)
+        e = html.index("</script>", s)
+        self.assertEqual(json.loads(html[s:e]), {})
+
+    def test_status_snap_back_via_cleared_fields_evicts_node(self):
+        # Realistic shape the client will now POST when the reviewer snaps
+        # a status back to canonical on a node whose only overlay field
+        # was `new_status`. With cleared_fields the server runs the field-
+        # merge path; the resulting entry has only node_id left, so the
+        # node is evicted from the stored overlay.
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "amb-streaks", "new_status": "resolved",
+                 "resolution": {"choice_id": "first-class"}},
+            ],
+        })
+        # Snap-back: status to canonical, drop the now-stale resolution too.
+        # Comment was never set, so it isn't in cleared_fields.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "amb-streaks",
+                 "cleared_fields": ["new_status", "resolution"]},
+            ],
+        })
+        stored = json.loads((Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json").read_text("utf-8"))
+        ids = [r["node_id"] for r in stored.get("reviews") or []]
+        self.assertNotIn("amb-streaks", ids,
+                         "snap-back-to-canonical must evict the overlay entry")
+
+    def test_cleared_fields_with_field_merge_preserves_unlisted_fields(self):
+        # When cleared_fields is present the server switches from full-
+        # replace to field-merge (ADR-0011). Any prior overlay field NOT
+        # listed in cleared_fields is PRESERVED — the client must account
+        # for that and include every field it intentionally drops, not
+        # just the snap-back one. This test pins the contract.
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "body_edit": "BODY-KEEP", "comment": "draft"},
+            ],
+        })
+        # Drop new_status only. comment + body_edit must survive.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "cleared_fields": ["new_status"]},
+            ],
+        })
+        stored = json.loads((Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json").read_text("utf-8"))
+        plat = next(r for r in stored["reviews"] if r["node_id"] == "deci-platform")
+        self.assertNotIn("new_status", plat)
+        self.assertEqual(plat.get("body_edit"), "BODY-KEEP")
+        self.assertEqual(plat.get("comment"), "draft")
+
     def test_overlay_does_not_persist_into_node_review_comment(self):
         # ADR-0011: overlay comments are a separate baseline. They must NOT
         # be written into node.review.comment on the stored revision sidecar,

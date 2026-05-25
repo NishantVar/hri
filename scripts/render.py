@@ -225,6 +225,7 @@ def build_html(
     session_id: str | None = None,
     base_revision: int | None = None,
     overlay_entries: dict[str, dict] | None = None,
+    canonical_by_id: dict[str, dict] | None = None,
 ) -> str:
     ordered = topo_order(spec["nodes"])
     affects = compute_affects(spec["nodes"])
@@ -260,12 +261,18 @@ def build_html(
     submit_payload = submit_payload.replace("</", "<\\/")
     overlay_payload = json.dumps(overlay_entries or {})
     overlay_payload = overlay_payload.replace("</", "<\\/")
+    # Standalone render (canonical_by_id=None) emits {} — the client falls
+    # back to n.status (which IS canonical when no overlay merge has run).
+    # ADR-0011 amendment: daemon-served path always passes a populated map.
+    canonical_payload = json.dumps(canonical_by_id or {})
+    canonical_payload = canonical_payload.replace("</", "<\\/")
     return TEMPLATE.replace("__TITLE__", title) \
         .replace("__SPEC_ID__", spec_id) \
         .replace("__VERSION__", str(spec["version"])) \
         .replace("__PAYLOAD__", payload_json) \
         .replace("__SUBMIT__", submit_payload) \
         .replace("__OVERLAY_ENTRIES__", overlay_payload) \
+        .replace("__CANONICAL_BY_ID__", canonical_payload) \
         .replace("__GENERATED_AT__", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
@@ -839,6 +846,9 @@ __SUBMIT__
 <script type="application/json" id="overlay-entries">
 __OVERLAY_ENTRIES__
 </script>
+<script type="application/json" id="canonical-by-id">
+__CANONICAL_BY_ID__
+</script>
 
 <script>
 (function() {
@@ -855,6 +865,17 @@ __OVERLAY_ENTRIES__
   try {
     OVERLAY_BY_ID = JSON.parse(document.getElementById("overlay-entries").textContent) || {};
   } catch (_) { OVERLAY_BY_ID = {}; }
+
+  // ADR-0011 amendment: canonical (pre-overlay) status + ambiguity resolution
+  // exposed by the daemon as a parallel JSON island. Used by buildEntryForNode
+  // to detect snap-back-to-canonical and route the diff into cleared_fields so
+  // the server's overlay merge evicts the node rather than persisting a no-op.
+  // Empty {} in standalone mode (no daemon, no overlay merge) — JS helpers
+  // below fall back to n.status, which IS canonical in that mode.
+  let CANONICAL_BY_ID = {};
+  try {
+    CANONICAL_BY_ID = JSON.parse(document.getElementById("canonical-by-id").textContent) || {};
+  } catch (_) { CANONICAL_BY_ID = {}; }
 
   // Status dropdown options. Every status from the node's enum is selectable
   // so the form can pre-fill to the current applied status (slice 2). The
@@ -970,6 +991,20 @@ __OVERLAY_ENTRIES__
     const aFree = (a && typeof a.freeform === "string") ? a.freeform.trim() : "";
     const bFree = (b && typeof b.freeform === "string") ? b.freeform.trim() : "";
     return aFree === bFree;
+  }
+
+  // Canonical lookups. Daemon-served pages populate CANONICAL_BY_ID for every
+  // node; standalone pages emit {} so we fall back to n.status (which is
+  // canonical in standalone since no overlay merge mutates it).
+  function canonicalStatus(nid) {
+    const c = CANONICAL_BY_ID[nid];
+    if (c && typeof c.status === "string") return c.status;
+    return STATUS_BY_ID[nid];
+  }
+  function canonicalResolution(nid) {
+    const c = CANONICAL_BY_ID[nid];
+    if (c && Object.prototype.hasOwnProperty.call(c, "resolution")) return c.resolution;
+    return null;
   }
 
   // Slice 1+2: touched = state differs from APPLIED_BY_ID for that node.
@@ -1466,6 +1501,41 @@ __OVERLAY_ENTRIES__
     // comment: state value is canonical here. Empty comment intentionally
     // clears the overlay's prior comment (user explicitly emptied the box).
     if (trimmedComment) entry.comment = trimmedComment;
+    // Snap-back-to-canonical (ADR-0011 amendment). If the user dragged a
+    // field back to its canonical value, including it as a value is a no-op
+    // overlay — drop it and list the field in `cleared_fields` so the
+    // server's overlay merge evicts the field (or the whole node if nothing
+    // remains). Canonical comes from CANONICAL_BY_ID (daemon path) or
+    // STATUS_BY_ID fallback (standalone, where node.status IS canonical).
+    const clearedFields = [];
+    if (typeof entry.new_status === "string"
+        && entry.new_status === canonicalStatus(n.id)) {
+      clearedFields.push("new_status");
+      delete entry.new_status;
+    }
+    if (n.kind === "ambiguity"
+        && resolutionDiff
+        && resolutionsEqual(s.resolution, canonicalResolution(n.id))) {
+      // `entry.resolution` may be absent here (user cleared resolution and
+      // canonical is null). Always list it so field-merge doesn't preserve
+      // a stale prior-overlay resolution.
+      clearedFields.push("resolution");
+      delete entry.resolution;
+    }
+    // Field-merge edge: when `cleared_fields` is present, the server's merge
+    // PRESERVES any prior-overlay field the entry doesn't mention. So when
+    // the user intentionally removed a field (empty comment, dropped
+    // resolution) we must also list it — otherwise the prior overlay value
+    // survives. The conditions below mirror the "user removed this" cases
+    // not already handled by snap-back above.
+    if (commentDiff && !trimmedComment && existing.comment !== undefined
+        && clearedFields.indexOf("comment") === -1) {
+      clearedFields.push("comment");
+    }
+    if (resolutionDiff && entry.resolution === undefined && existing.resolution !== undefined
+        && clearedFields.indexOf("resolution") === -1) {
+      clearedFields.push("resolution");
+    }
     // If the composed entry has no meaningful fields but there IS an
     // existing overlay entry for this node, the user effectively cleared
     // the overlay (e.g. cleared a comment-only entry). The daemon's
@@ -1475,15 +1545,16 @@ __OVERLAY_ENTRIES__
     // evict the node (ADR-0011).
     const meaningfulKeys = ["new_status", "resolution", "body_edit", "comment"];
     const isEmpty = !meaningfulKeys.some(k => entry[k] !== undefined);
-    if (isEmpty) {
+    if (isEmpty && clearedFields.length === 0) {
       const existingKeys = Object.keys(existing).filter(k => k !== "node_id");
       if (existingKeys.length > 0) {
-        entry.cleared_fields = existingKeys;
+        existingKeys.forEach(k => clearedFields.push(k));
       } else {
         // No overlay existed and no meaningful diff produced — nothing to submit.
         return null;
       }
     }
+    if (clearedFields.length > 0) entry.cleared_fields = clearedFields;
     return entry;
   }
 
@@ -1668,17 +1739,20 @@ __OVERLAY_ENTRIES__
     const applied = APPLIED_BY_ID[nid];
     if (!applied) return;
     const newOverlay = OVERLAY_BY_ID[nid];
-    // Status: overlay value wins, else canonical (the SPEC payload's status
-    // is the merged-overlay-at-render value, so we re-read canonical from
-    // the prior STATUS_BY_ID when the overlay clears it... but STATUS_BY_ID
-    // also reflects render-time merge. The pragmatic anchor: if the new
-    // overlay drops new_status, the node's "canonical" view is what the
-    // server would render next time with this overlay — which is canonical.
-    // We don't have canonical in JS, so fall back to leaving status alone
-    // when the overlay clears it. On the next reload the page rebases.).
+    // Status: overlay value wins; otherwise snap APPLIED + STATUS_BY_ID back
+    // to canonical so subsequent edits on the same page diff against the
+    // real post-submit state (ADR-0011 amendment — canonical now exposed
+    // via CANONICAL_BY_ID, so the cleared/evicted path can rebase locally
+    // instead of waiting for a reload).
     if (newOverlay && typeof newOverlay.new_status === "string" && newOverlay.new_status) {
       applied.status = newOverlay.new_status;
       STATUS_BY_ID[nid] = newOverlay.new_status;
+    } else {
+      const canon = canonicalStatus(nid);
+      if (typeof canon === "string") {
+        applied.status = canon;
+        STATUS_BY_ID[nid] = canon;
+      }
     }
     if (newOverlay && newOverlay.resolution && typeof newOverlay.resolution === "object") {
       applied.resolution = {
@@ -1686,10 +1760,19 @@ __OVERLAY_ENTRIES__
         freeform: newOverlay.resolution.freeform || null,
       };
     } else if (node && node.kind === "ambiguity") {
-      // Overlay no longer carries a resolution. Without canonical, the
-      // safe page-local advance is to clear it; reload will re-baseline
-      // from the spec on disk.
-      applied.resolution = null;
+      // Overlay no longer carries a resolution — restore canonical (may
+      // itself be null/absent for unresolved ambiguities; for ambiguities
+      // canonically resolved in the spec we restore the real object so the
+      // next edit composes correctly without a reload).
+      const canonRes = canonicalResolution(nid);
+      if (canonRes && typeof canonRes === "object") {
+        applied.resolution = {
+          choice_id: canonRes.choice_id || null,
+          freeform: canonRes.freeform || null,
+        };
+      } else {
+        applied.resolution = null;
+      }
     }
     applied.comment = (newOverlay && typeof newOverlay.comment === "string")
       ? newOverlay.comment : "";

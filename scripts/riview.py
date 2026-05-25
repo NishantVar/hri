@@ -921,6 +921,12 @@ def _render_session_html(
         return HTTPStatus.CONFLICT, _render_invalid_session_html(sid, errors)
     md_text = md_bytes.decode("utf-8")
     bodies = render.parse_anchored_bodies(md_text)
+    # Snapshot canonical (pre-overlay) status + ambiguity resolution BEFORE
+    # _apply_overlay_to_spec mutates node["status"]/["resolution"] in place
+    # (ADR-0011 amendment). Client uses this to detect snap-back-to-canonical
+    # and route the diff into cleared_fields. STATUS_BY_ID on the page is the
+    # post-merge view, so it cannot serve this role.
+    canonical_by_id = _snapshot_canonical(spec)
     overlay_entries = _apply_overlay_to_spec(sid, cur, spec, bodies)
     return HTTPStatus.OK, render.build_html(
         spec,
@@ -930,7 +936,35 @@ def _render_session_html(
         session_id=sid,
         base_revision=cur,
         overlay_entries=overlay_entries,
+        canonical_by_id=canonical_by_id,
     )
+
+
+def _snapshot_canonical(spec: dict) -> dict[str, dict]:
+    """Snapshot canonical status + ambiguity resolution per node.
+
+    Must be called BEFORE _apply_overlay_to_spec mutates the node dicts.
+    Shape: ``{nid: {"status": <str>, "resolution": <dict|null>}}`` — the
+    resolution key is present only for ambiguity nodes (decisions/risks
+    do not carry a resolution field). Used by the daemon-served render
+    path to expose canonical to the client (ADR-0011 amendment).
+    """
+    out: dict[str, dict] = {}
+    nodes = spec.get("nodes") if isinstance(spec, dict) else None
+    if not isinstance(nodes, list):
+        return out
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = node.get("id")
+        if not isinstance(nid, str):
+            continue
+        entry: dict = {"status": node.get("status")}
+        if node.get("kind") == "ambiguity":
+            res = node.get("resolution")
+            entry["resolution"] = res if isinstance(res, dict) else None
+        out[nid] = entry
+    return out
 
 
 def _apply_overlay_to_spec(
