@@ -362,12 +362,39 @@ TEMPLATE = r"""<!doctype html>
     padding: 0 24px;
   }
   .card {
-    background: var(--card-bg);
+    --card-accent: var(--border-strong);
+    --card-tint: var(--card-bg);
+    background: var(--card-tint);
     border: 1px solid var(--border);
+    border-inline-start: 4px solid var(--card-accent);
     border-radius: 8px;
-    padding: 16px 18px;
+    padding: 16px 14px 16px 18px;
     margin-bottom: 16px;
-    transition: border-color 120ms;
+    transition: border-color 120ms, background-color 120ms;
+  }
+  /* Status-driven accent + tint. Grouped by effective color so dark mode
+     inherits via the per-status CSS variables defined in :root. */
+  .card[data-status="confirmed"],
+  .card[data-status="accepted"],
+  .card[data-status="mitigated"],
+  .card[data-status="resolved"] {
+    --card-accent: var(--status-confirmed);
+    --card-tint: color-mix(in oklab, var(--status-confirmed) 7%, var(--card-bg));
+  }
+  .card[data-status="needs-work"],
+  .card[data-status="open"] {
+    --card-accent: var(--status-needs-work);
+    --card-tint: color-mix(in oklab, var(--status-needs-work) 7%, var(--card-bg));
+  }
+  .card[data-status="rejected"] {
+    --card-accent: var(--status-rejected);
+    --card-tint: color-mix(in oklab, var(--status-rejected) 7%, var(--card-bg));
+  }
+  .card[data-status="ai-confident"],
+  .card[data-status="deferred"],
+  .card[data-status="dismissed"] {
+    --card-accent: var(--status-ai);
+    --card-tint: color-mix(in oklab, var(--status-ai) 5%, var(--card-bg));
   }
   .card.touched {
     background: var(--touched-bg);
@@ -429,18 +456,56 @@ TEMPLATE = r"""<!doctype html>
     margin-right: 2px;
   }
   .chip {
+    --chip-accent: var(--border);
+    --chip-fg: var(--muted);
     display: inline-flex;
     align-items: center;
     padding: 2px 8px;
     border-radius: 10px;
-    border: 1px solid var(--border);
+    border: 1px solid var(--chip-accent);
     background: var(--bg);
-    color: var(--muted);
+    color: var(--chip-fg);
     text-decoration: none;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
   }
+  /* Dep/affects chips inherit their target node's status color so the chain
+     can be traced visually. Grouped to match the card[data-status] rules. */
+  .chip[data-status="confirmed"],
+  .chip[data-status="accepted"],
+  .chip[data-status="mitigated"],
+  .chip[data-status="resolved"] {
+    --chip-accent: color-mix(in oklab, var(--status-confirmed) 55%, var(--border));
+    --chip-fg: var(--status-confirmed);
+  }
+  .chip[data-status="needs-work"],
+  .chip[data-status="open"] {
+    --chip-accent: color-mix(in oklab, var(--status-needs-work) 55%, var(--border));
+    --chip-fg: var(--status-needs-work);
+  }
+  .chip[data-status="rejected"] {
+    --chip-accent: color-mix(in oklab, var(--status-rejected) 55%, var(--border));
+    --chip-fg: var(--status-rejected);
+  }
+  .chip[data-status="ai-confident"],
+  .chip[data-status="deferred"],
+  .chip[data-status="dismissed"] {
+    --chip-accent: var(--border-strong);
+    --chip-fg: var(--muted);
+  }
   .chip:hover, .chip:focus-visible { border-color: var(--accent); color: var(--fg); }
+  .downstream-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in oklab, var(--status-needs-work) 45%, var(--border));
+    background: color-mix(in oklab, var(--status-needs-work) 8%, var(--bg));
+    color: var(--status-needs-work);
+    font-size: 11px;
+    font-weight: 600;
+  }
   .stale-badge {
     display: none;
     font-size: 11px;
@@ -806,16 +871,75 @@ __SUBMIT__
     };
   });
 
+  // Persisted status by id; used to color depends_on/affects chips and to
+  // compute static downstream-pending counts. Does NOT track live form state.
+  const STATUS_BY_ID = {};
+  SPEC.nodes.forEach(n => { STATUS_BY_ID[n.id] = n.status; });
+
+  // Cards in these persisted statuses get a "↓ N downstream pending" chip
+  // when any of their transitive downstream are still in PENDING_STATUSES.
+  // Rejection/deferral/dismissal are terminal — they don't trigger the chip.
+  const APPROVING_STATUSES = new Set(["confirmed", "accepted", "mitigated", "resolved"]);
+  const PENDING_STATUSES = new Set(["ai-confident", "needs-work", "open"]);
+
+  // Forward graph from depends_on: forward[X] = ids that depend on X.
+  const FORWARD = {};
+  SPEC.nodes.forEach(n => { FORWARD[n.id] = []; });
+  SPEC.nodes.forEach(n => {
+    (Array.isArray(n.depends_on) ? n.depends_on : []).forEach(dep => {
+      if (FORWARD[dep]) FORWARD[dep].push(n.id);
+    });
+  });
+
+  // BFS the transitive downstream of `id`, returning ids whose persisted
+  // status is still pending. Computed once per card at render time.
+  function pendingDownstream(id) {
+    const pending = [];
+    const seen = new Set([id]);
+    const queue = [...(FORWARD[id] || [])];
+    while (queue.length) {
+      const next = queue.shift();
+      if (seen.has(next)) continue;
+      seen.add(next);
+      if (PENDING_STATUSES.has(STATUS_BY_ID[next])) pending.push(next);
+      (FORWARD[next] || []).forEach(c => { if (!seen.has(c)) queue.push(c); });
+    }
+    pending.sort();
+    return pending;
+  }
+
   function isTouchedState(s) {
     return Boolean(s.new_status) || Boolean(s.comment.trim()) || s.resolution !== null;
+  }
+
+  // A "pure approval" is a status flip to {confirmed,accepted,mitigated} with
+  // no other content (no comment, no resolution, no body edit). Approval adds
+  // no new semantic information — it just endorses what's already there — so
+  // it must NOT mark downstream as upstream-stale. `resolved` deliberately is
+  // NOT here: resolving an ambiguity records a choice/freeform answer, which
+  // is real new content downstream may want to react to.
+  function isPureApproval(s) {
+    if (s.new_status !== "confirmed" && s.new_status !== "accepted" && s.new_status !== "mitigated") return false;
+    if (s.comment && s.comment.trim().length > 0) return false;
+    if (s.resolution !== null) return false;
+    if (s.body_edit) return false;
+    return true;
+  }
+
+  // "Material change" = touched AND not a pure approval. Used only by the
+  // upstream-changed badge — other call sites (touched class, submit button
+  // enable, footer counter) legitimately want any-touch and keep using
+  // isTouchedState directly.
+  function isMaterialChange(s) {
+    return isTouchedState(s) && !isPureApproval(s);
   }
 
   function recomputeStaleness() {
     SPEC.nodes.forEach(n => {
       const deps = Array.isArray(n.depends_on) ? n.depends_on : [];
-      const upstreamTouched = deps.some(d => state[d] && isTouchedState(state[d]));
+      const upstreamMaterial = deps.some(d => state[d] && isMaterialChange(state[d]));
       const el = document.getElementById("card-" + n.id);
-      if (el) el.classList.toggle("upstream-stale", upstreamTouched);
+      if (el) el.classList.toggle("upstream-stale", upstreamMaterial);
     });
   }
 
@@ -834,6 +958,7 @@ __SUBMIT__
     card.id = "card-" + node.id;
     card.dataset.nodeId = node.id;
     card.dataset.kind = node.kind;
+    card.dataset.status = node.status;
     const depList = Array.isArray(node.depends_on) ? node.depends_on : [];
     const affList = Array.isArray(node._affects) ? node._affects : [];
     const chipText = depList.concat(affList).join(" ");
@@ -846,16 +971,26 @@ __SUBMIT__
     head.className = "head";
     function chipsRow(label, ids) {
       if (!ids.length) return "";
-      const chips = ids.map(id =>
-        `<a class="chip" href="#card-${escapeHtml(id)}">${escapeHtml(id)}</a>`
-      ).join("");
+      const chips = ids.map(id => {
+        const targetStatus = STATUS_BY_ID[id] || "";
+        return `<a class="chip" data-status="${escapeHtml(targetStatus)}" href="#card-${escapeHtml(id)}">${escapeHtml(id)}</a>`;
+      }).join("");
       return `<div class="chips"><span class="chip-label">${label}</span>${chips}</div>`;
+    }
+    let downstreamChipHtml = "";
+    if (APPROVING_STATUSES.has(node.status)) {
+      const pending = pendingDownstream(node.id);
+      if (pending.length) {
+        const title = "Downstream still pending: " + pending.join(", ");
+        downstreamChipHtml = `<span class="downstream-chip" title="${escapeHtml(title)}">↓ ${pending.length} downstream pending</span>`;
+      }
     }
     head.innerHTML = `
       <span class="badge kind-${escapeHtml(node.kind)}">${escapeHtml(node.kind)}</span>
       <span class="badge status status-${escapeHtml(node.status)}">${escapeHtml(node.status)}</span>
       ${node.kind === "risk" ? `<span class="badge sev-${escapeHtml(node.severity)}">${escapeHtml(node.severity)} severity</span>` : ""}
       <span class="stale-badge" title="An upstream decision has unsubmitted changes — review may need recalibration.">↑ upstream changed</span>
+      ${downstreamChipHtml}
       <span class="id">${escapeHtml(node.id)}</span>
       <h2>${escapeHtml(node.title)}</h2>
       ${chipsRow("depends on", depList)}
