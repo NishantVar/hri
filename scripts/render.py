@@ -1427,7 +1427,7 @@ __CANONICAL_BY_ID__
             cardStatusEl.classList.add("error");
             cardSubmitBtn.disabled = false;
           } else {
-            cardStatusEl.textContent = "Submitted (rev " + (data.current_revision || data.revision || "?") + ", " + (data.review_count || 1) + " on server)";
+            cardStatusEl.textContent = "Submitted (rev " + (data.current_revision || data.revision || "?") + ", " + (data.review_count ?? 1) + " on server)";
             cardStatusEl.classList.add("ok");
             // Advance the in-memory baseline so the form reflects what is
             // now on the server. Without this, resetNodeStateToApplied below
