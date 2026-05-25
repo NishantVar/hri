@@ -1252,11 +1252,11 @@ __CANONICAL_BY_ID__
     const cardSubmitBtn = review.querySelector('[data-role="card-submit"]');
     const cardStatusEl = review.querySelector('[data-role="card-status"]');
 
-    // Slice 2+3: pre-fill form from state[node.id]. state was seeded with
-    // APPLIED_BY_ID at init and may have been overridden by rehydrated draft
-    // values (slice 3). Touched-vs-applied detection means prefilled values
-    // that still match applied do NOT mark the card as touched.
-    resyncCardDom(node.id);
+    // Slice 2+3: pre-fill is handled by the caller (init) AFTER the card is
+    // appended to the document — resyncCardDom uses document.getElementById
+    // to find the card, which fails until the card is in the DOM. Cards with
+    // an active overlay (state.new_status differs from the first-option
+    // default) would otherwise stay stuck on the default select option.
 
     function updateTouched() {
       const touched = isTouchedNode(node.id);
@@ -1834,6 +1834,9 @@ __CANONICAL_BY_ID__
     renderCounts();
     const container = document.getElementById("nodes");
     SPEC.nodes.forEach(n => container.appendChild(renderCard(n)));
+    // Prefill form fields from state. Must run AFTER append — resyncCardDom
+    // looks the card up via document.getElementById.
+    SPEC.nodes.forEach(n => resyncCardDom(n.id));
     recomputeFooter();
 
     const modal = document.getElementById("export-modal");
