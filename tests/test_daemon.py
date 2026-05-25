@@ -963,6 +963,37 @@ class RiviewDaemonTests(unittest.TestCase):
         self.assertNotIn("comment", plat)
         self.assertNotIn("cleared_fields", plat)
 
+    def test_cleared_fields_rejects_malformed_values(self):
+        # Hardening: cleared_fields is a write semantic, so the POST path
+        # rejects shapes other than `list[str]` drawn from the known overlay
+        # fields. Keeps accidental API callers from turning a typo into an
+        # unexpected overlay deletion.
+        sid = self._submit_sample()
+        for bad in (
+            "comment",                       # not a list
+            ["comment", 42],                 # non-string element
+            ["unknown_field"],               # not in the allowed set
+            True,                            # not a list
+        ):
+            body = {
+                "spec_id": "pomodoro-mvp",
+                "spec_version": 1,
+                "base_revision": 1,
+                "reviews": [
+                    {"node_id": "deci-platform", "cleared_fields": bad},
+                ],
+            }
+            req = urllib.request.Request(
+                self.base + f"/sessions/{sid}/review",
+                data=json.dumps(body).encode("utf-8"),
+                method="POST",
+                headers={"X-Riview-Token": self._token(),
+                         "Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(req).read()
+            self.assertEqual(cm.exception.code, 400)
+
     def test_overlay_does_not_persist_into_node_review_comment(self):
         # ADR-0011: overlay comments are a separate baseline. They must NOT
         # be written into node.review.comment on the stored revision sidecar,

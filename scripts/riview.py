@@ -586,6 +586,17 @@ def record_review_for_session(
                 f"review.reviews[{i}].node_id must be a non-empty string",
                 http_status=400,
             )
+        if "cleared_fields" in entry:
+            cleared = entry["cleared_fields"]
+            allowed = {"new_status", "resolution", "body_edit", "comment"}
+            if not isinstance(cleared, list) or not all(
+                isinstance(f, str) and f in allowed for f in cleared
+            ):
+                raise ReviewError(
+                    f"review.reviews[{i}].cleared_fields must be a list of "
+                    f"strings drawn from {sorted(allowed)}",
+                    http_status=400,
+                )
 
     base_revision_raw = review.get("base_revision")
     has_base = "base_revision" in review and base_revision_raw is not None
