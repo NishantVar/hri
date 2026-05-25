@@ -778,6 +778,403 @@ class RiviewDaemonTests(unittest.TestCase):
         self.assertEqual(mode, 0o600)
 
 
+    def test_session_page_renders_overlay_status_and_comment(self):
+        # Slice 1: after a review POST, reloading the session page must reflect
+        # the submitted status + body_edit in the rendered SPEC, and the full
+        # overlay entries must surface in the overlay-entries JSON island so
+        # the textarea re-prefills and the client can compose full entries on
+        # partial-field edits.
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "body_edit": "REVIEWED-BODY-MARK", "comment": "Locked in."},
+                {"node_id": "amb-sync", "new_status": "resolved",
+                 "resolution": {"choice_id": "local"},
+                 "comment": "Local-only for v1."},
+            ],
+        })
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+
+        # Overlay-entries JSON island present and carries the full entries
+        # (not just comments) so the client can preserve unchanged fields.
+        marker = '<script type="application/json" id="overlay-entries">'
+        self.assertIn(marker, body)
+        start = body.index(marker) + len(marker)
+        end = body.index("</script>", start)
+        overlay = json.loads(body[start:end])
+        self.assertEqual(overlay["deci-platform"]["comment"], "Locked in.")
+        self.assertEqual(overlay["deci-platform"]["new_status"], "confirmed")
+        self.assertEqual(overlay["deci-platform"]["body_edit"], "REVIEWED-BODY-MARK")
+        self.assertEqual(overlay["amb-sync"]["comment"], "Local-only for v1.")
+        self.assertEqual(overlay["amb-sync"]["resolution"], {"choice_id": "local"})
+
+        # Spec payload reflects the merged status / resolution / body.
+        spec_marker = '<script type="application/json" id="spec-payload">'
+        s = body.index(spec_marker) + len(spec_marker)
+        e = body.index("</script>", s)
+        spec_payload = json.loads(body[s:e])
+        nodes_by_id = {n["id"]: n for n in spec_payload["nodes"]}
+        self.assertEqual(nodes_by_id["deci-platform"]["status"], "confirmed")
+        self.assertIn("REVIEWED-BODY-MARK", nodes_by_id["deci-platform"]["_body_md"])
+        self.assertEqual(nodes_by_id["amb-sync"]["status"], "resolved")
+        self.assertEqual(
+            nodes_by_id["amb-sync"]["resolution"].get("choice_id"), "local",
+        )
+
+    def test_session_page_with_no_overlay_renders_empty_overlay_comments(self):
+        # Fresh session, no review.json on disk. Render must not error, and
+        # the overlay-entries island must be the empty object.
+        sid = self._submit_sample()
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        marker = '<script type="application/json" id="overlay-entries">'
+        self.assertIn(marker, body)
+        start = body.index(marker) + len(marker)
+        end = body.index("</script>", start)
+        self.assertEqual(json.loads(body[start:end]), {})
+        # No overlay file should have been materialized just from rendering.
+        overlay_path = Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json"
+        self.assertFalse(overlay_path.exists())
+
+    def test_partial_field_resubmit_preserves_other_overlay_fields(self):
+        # Regression: the daemon's by-node-id replace-merge will drop any
+        # field that's missing from a re-submitted entry. The renderer must
+        # therefore emit FULL effective overlay entries, not sparse diffs —
+        # and the daemon's overlay-entries island must carry every field
+        # needed to recompose them. Simulate the client behavior here by
+        # POSTing the composed full entry; assert that status / resolution /
+        # body_edit survive a comment-only edit.
+        sid = self._submit_sample()
+        # 1) Initial submit: full state for one node.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "body_edit": "BODY-V1", "comment": "Locked in."},
+            ],
+        })
+        # 2) Reload and read the overlay-entries island as the client would.
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        marker = '<script type="application/json" id="overlay-entries">'
+        s = body.index(marker) + len(marker)
+        e = body.index("</script>", s)
+        overlay = json.loads(body[s:e])
+        existing = overlay["deci-platform"]
+        # 3) Compose a full entry mirroring buildEntryForNode's behavior:
+        # only the comment changed, but the client preserves new_status /
+        # body_edit from the existing overlay so the merge does not drop them.
+        composed = dict(existing)
+        composed["comment"] = "Actually v2"
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [composed],
+        })
+        # 4) On the next render, the merged spec must STILL reflect the
+        # original status + body_edit. Without the full-entry contract, the
+        # replace-merge would have stored only {comment: ...} and the status
+        # would have reverted to canonical here.
+        body2 = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        sm = '<script type="application/json" id="spec-payload">'
+        s2 = body2.index(sm) + len(sm)
+        e2 = body2.index("</script>", s2)
+        spec_payload = json.loads(body2[s2:e2])
+        nodes_by_id = {n["id"]: n for n in spec_payload["nodes"]}
+        self.assertEqual(nodes_by_id["deci-platform"]["status"], "confirmed")
+        self.assertIn("BODY-V1", nodes_by_id["deci-platform"]["_body_md"])
+        # Overlay-entries island carries the new comment plus all preserved fields.
+        o2_start = body2.index(marker) + len(marker)
+        o2_end = body2.index("</script>", o2_start)
+        overlay2 = json.loads(body2[o2_start:o2_end])
+        self.assertEqual(overlay2["deci-platform"]["comment"], "Actually v2")
+        self.assertEqual(overlay2["deci-platform"]["new_status"], "confirmed")
+        self.assertEqual(overlay2["deci-platform"]["body_edit"], "BODY-V1")
+
+    def test_clear_comment_only_overlay_evicts_node_via_cleared_fields(self):
+        # Regression: with the daemon's empty-entry filter, a comment-only
+        # overlay entry could not be cleared by sending {node_id} alone —
+        # the filter would drop the submit and the stale comment would
+        # survive on reload. The client's compose path emits an explicit
+        # `cleared_fields: ["comment"]` marker in that case; the daemon's
+        # overlay merge applies it as a field-level diff and evicts the
+        # node when only `node_id` remains.
+        sid = self._submit_sample()
+        # 1) Submit a comment-only overlay entry.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "comment": "draft note"},
+            ],
+        })
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        marker = '<script type="application/json" id="overlay-entries">'
+        s = body.index(marker) + len(marker)
+        e = body.index("</script>", s)
+        overlay = json.loads(body[s:e])
+        self.assertEqual(overlay["deci-platform"]["comment"], "draft note")
+        # 2) Submit the cleared_fields marker the client would emit.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "cleared_fields": ["comment"]},
+            ],
+        })
+        # 3) Overlay is gone for this node, and the stored review.json no
+        # longer carries an entry for it.
+        body2 = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        s2 = body2.index(marker) + len(marker)
+        e2 = body2.index("</script>", s2)
+        overlay2 = json.loads(body2[s2:e2])
+        self.assertNotIn("deci-platform", overlay2)
+        stored = json.loads((Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json").read_text("utf-8"))
+        ids = [r["node_id"] for r in stored.get("reviews") or []]
+        self.assertNotIn("deci-platform", ids)
+
+    def test_cleared_fields_with_other_fields_drops_only_listed(self):
+        # When the overlay had multiple fields and only one is cleared, the
+        # remaining fields stay. (This path is exercised by the client when
+        # the composed entry still has meaningful content — `cleared_fields`
+        # in that case lets the server preserve the rest.)
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "comment": "Locked in."},
+            ],
+        })
+        # Drop the comment field via the marker; keep new_status implicitly.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "cleared_fields": ["comment"]},
+            ],
+        })
+        stored = json.loads((Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json").read_text("utf-8"))
+        plat = next(r for r in stored["reviews"] if r["node_id"] == "deci-platform")
+        self.assertEqual(plat.get("new_status"), "confirmed")
+        self.assertNotIn("comment", plat)
+        self.assertNotIn("cleared_fields", plat)
+
+    def test_cleared_fields_rejects_malformed_values(self):
+        # Hardening: cleared_fields is a write semantic, so the POST path
+        # rejects shapes other than `list[str]` drawn from the known overlay
+        # fields. Keeps accidental API callers from turning a typo into an
+        # unexpected overlay deletion.
+        sid = self._submit_sample()
+        for bad in (
+            "comment",                       # not a list
+            ["comment", 42],                 # non-string element
+            ["unknown_field"],               # not in the allowed set
+            True,                            # not a list
+        ):
+            body = {
+                "spec_id": "pomodoro-mvp",
+                "spec_version": 1,
+                "base_revision": 1,
+                "reviews": [
+                    {"node_id": "deci-platform", "cleared_fields": bad},
+                ],
+            }
+            req = urllib.request.Request(
+                self.base + f"/sessions/{sid}/review",
+                data=json.dumps(body).encode("utf-8"),
+                method="POST",
+                headers={"X-Riview-Token": self._token(),
+                         "Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(req).read()
+            self.assertEqual(cm.exception.code, 400)
+
+    def test_session_page_emits_canonical_by_id_island(self):
+        # ADR-0011 amendment: the renderer exposes canonical (pre-overlay)
+        # node status + ambiguity resolution as a JSON island parallel to
+        # `overlay-entries`. The client uses it to detect snap-back-to-
+        # canonical and route the diff into `cleared_fields` so the
+        # daemon's overlay merge evicts the node instead of keeping a
+        # no-op entry. STATUS_BY_ID on the page is post-merge so it
+        # cannot serve this role.
+        sid = self._submit_sample()
+        canonical_marker = '<script type="application/json" id="canonical-by-id">'
+        overlay_marker = '<script type="application/json" id="overlay-entries">'
+
+        # (a) Fresh session, no overlay: island carries canonical statuses
+        # for every node (and resolution=null for the ambiguity nodes).
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        self.assertIn(canonical_marker, body)
+        s = body.index(canonical_marker) + len(canonical_marker)
+        e = body.index("</script>", s)
+        canon = json.loads(body[s:e])
+        self.assertEqual(canon["amb-streaks"]["status"], "open")
+        self.assertIsNone(canon["amb-streaks"]["resolution"])
+        self.assertEqual(canon["deci-platform"]["status"], "ai-confident")
+        self.assertNotIn("resolution", canon["deci-platform"])  # non-ambiguity
+        self.assertEqual(canon["risk-bg"]["status"], "open")
+        self.assertNotIn("resolution", canon["risk-bg"])
+
+        # (b) POST a review that flips the ambiguity to resolved. After
+        # reload, canonical-by-id MUST still carry "open" for that node
+        # — this is the bug the fix targets. (overlay-entries correctly
+        # reflects the merged value, but canonical should not leak.)
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "amb-streaks", "new_status": "resolved",
+                 "resolution": {"choice_id": "first-class"},
+                 "comment": "A5"},
+            ],
+        })
+        body2 = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        s = body2.index(canonical_marker) + len(canonical_marker)
+        e = body2.index("</script>", s)
+        canon2 = json.loads(body2[s:e])
+        self.assertEqual(canon2["amb-streaks"]["status"], "open",
+                         "canonical-by-id must show canonical, not overlay-merged status")
+        self.assertIsNone(canon2["amb-streaks"]["resolution"],
+                          "canonical resolution for an unresolved ambiguity is null")
+        # Sanity: overlay-entries DOES reflect the overlay (separation of concerns).
+        s = body2.index(overlay_marker) + len(overlay_marker)
+        e = body2.index("</script>", s)
+        overlay = json.loads(body2[s:e])
+        self.assertEqual(overlay["amb-streaks"]["new_status"], "resolved")
+
+    def test_standalone_render_emits_empty_canonical_by_id_island(self):
+        # Standalone (non-daemon) render via scripts/render.py main(): no
+        # overlay merge ever happens, so canonical-by-id is the empty
+        # object. The client falls back to `n.status` (which IS canonical
+        # in standalone mode) when the island is empty.
+        with tempfile.TemporaryDirectory(prefix="riview-standalone-") as td:
+            spec_dir = Path(td)
+            shutil.copy(SAMPLE / "spec.md", spec_dir / "spec.md")
+            shutil.copy(SAMPLE / "spec.decisions.json", spec_dir / "spec.decisions.json")
+            subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts" / "render.py"), str(spec_dir)],
+                capture_output=True, text=True, check=True,
+            )
+            html = (spec_dir / "spec.html").read_text("utf-8")
+        marker = '<script type="application/json" id="canonical-by-id">'
+        self.assertIn(marker, html)
+        s = html.index(marker) + len(marker)
+        e = html.index("</script>", s)
+        self.assertEqual(json.loads(html[s:e]), {})
+
+    def test_status_snap_back_via_cleared_fields_evicts_node(self):
+        # Realistic shape the client will now POST when the reviewer snaps
+        # a status back to canonical on a node whose only overlay field
+        # was `new_status`. With cleared_fields the server runs the field-
+        # merge path; the resulting entry has only node_id left, so the
+        # node is evicted from the stored overlay.
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "amb-streaks", "new_status": "resolved",
+                 "resolution": {"choice_id": "first-class"}},
+            ],
+        })
+        # Snap-back: status to canonical, drop the now-stale resolution too.
+        # Comment was never set, so it isn't in cleared_fields.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "amb-streaks",
+                 "cleared_fields": ["new_status", "resolution"]},
+            ],
+        })
+        stored = json.loads((Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json").read_text("utf-8"))
+        ids = [r["node_id"] for r in stored.get("reviews") or []]
+        self.assertNotIn("amb-streaks", ids,
+                         "snap-back-to-canonical must evict the overlay entry")
+
+    def test_cleared_fields_with_field_merge_preserves_unlisted_fields(self):
+        # When cleared_fields is present the server switches from full-
+        # replace to field-merge (ADR-0011). Any prior overlay field NOT
+        # listed in cleared_fields is PRESERVED — the client must account
+        # for that and include every field it intentionally drops, not
+        # just the snap-back one. This test pins the contract.
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "body_edit": "BODY-KEEP", "comment": "draft"},
+            ],
+        })
+        # Drop new_status only. comment + body_edit must survive.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "cleared_fields": ["new_status"]},
+            ],
+        })
+        stored = json.loads((Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json").read_text("utf-8"))
+        plat = next(r for r in stored["reviews"] if r["node_id"] == "deci-platform")
+        self.assertNotIn("new_status", plat)
+        self.assertEqual(plat.get("body_edit"), "BODY-KEEP")
+        self.assertEqual(plat.get("comment"), "draft")
+
+    def test_overlay_does_not_persist_into_node_review_comment(self):
+        # ADR-0011: overlay comments are a separate baseline. They must NOT
+        # be written into node.review.comment on the stored revision sidecar,
+        # otherwise stale comments would survive into the applied spec via
+        # the responder's read path.
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "comment": "draft note"},
+            ],
+        })
+        urllib.request.urlopen(self.base + f"/sessions/{sid}").read()
+        sidecar_path = Path(self.tmp) / "sessions" / sid / "revisions" / "1" / "decisions.json"
+        sidecar = json.loads(sidecar_path.read_text("utf-8"))
+        plat = next(n for n in sidecar["nodes"] if n["id"] == "deci-platform")
+        # Either no review block, or review.comment is not the overlay text.
+        review_block = plat.get("review") or {}
+        self.assertNotEqual(review_block.get("comment"), "draft note")
+
+
+class RiviewStorageRootTests(unittest.TestCase):
+    """Slice 0: storage root precedence — repo-local default, env override."""
+
+    def test_default_is_repo_local(self):
+        # Importing the module fresh with no RIVIEW_HOME set should resolve
+        # the storage root to <riview_repo>/.riview/ (next to scripts/).
+        env = {k: v for k, v in os.environ.items() if k != "RIVIEW_HOME"}
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, 'scripts'); "
+             "import riview; print(riview.riview_home())"],
+            cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=True,
+        )
+        expected = (REPO_ROOT / ".riview").resolve()
+        self.assertEqual(Path(r.stdout.strip()).resolve(), expected)
+
+    def test_env_override_wins(self):
+        env = {**os.environ, "RIVIEW_HOME": "/tmp/riview-some-override"}
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, 'scripts'); "
+             "import riview; print(riview.riview_home())"],
+            cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(r.stdout.strip(), "/tmp/riview-some-override")
+
+
 class RiviewDaemonHostGateTests(unittest.TestCase):
     """Daemon-startup tests that don't share the long-lived fixture above."""
 

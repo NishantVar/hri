@@ -67,8 +67,14 @@ def validate_session_id(sid: str) -> None:
 
 
 def riview_home() -> Path:
+    # Storage root precedence: $RIVIEW_HOME, else repo-local `<riview_repo>/.riview/`.
+    # The default lives next to the daemon source so one RIView checkout backs
+    # all consuming-project agents that submit to it. Existing `~/.riview/`
+    # deployments keep working by exporting `RIVIEW_HOME=~/.riview`.
     override = os.environ.get("RIVIEW_HOME")
-    return Path(override) if override else Path.home() / ".riview"
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / ".riview"
 
 
 def sessions_root() -> Path:
@@ -419,6 +425,35 @@ class ReviewError(Exception):
         self.http_status = http_status
 
 
+def _apply_clears_to_existing(
+    existing_entry: dict | None, incoming: dict
+) -> dict | None:
+    """Compose the post-clear entry for the overlay merge path.
+
+    The client signals "drop these fields from the existing overlay entry"
+    by passing `cleared_fields: [...]`. We compute the merged entry as
+    `(existing - cleared) ∪ incoming_non_clear_fields`. If only `node_id`
+    remains, the node is fully evicted from the overlay (return None).
+    """
+    cleared = incoming.get("cleared_fields")
+    if not isinstance(cleared, list):
+        return None
+    base = dict(existing_entry) if isinstance(existing_entry, dict) else {
+        "node_id": incoming["node_id"]
+    }
+    base["node_id"] = incoming["node_id"]
+    for field in cleared:
+        if isinstance(field, str):
+            base.pop(field, None)
+    for key, value in incoming.items():
+        if key in ("cleared_fields", "node_id"):
+            continue
+        base[key] = value
+    if set(base.keys()) <= {"node_id"}:
+        return None  # signals deletion from the overlay
+    return base
+
+
 def _merge_reviews_by_node_id(
     existing: list[dict], incoming: list[dict]
 ) -> list[dict]:
@@ -426,13 +461,28 @@ def _merge_reviews_by_node_id(
 
     Later entries (incoming) win on conflict. Order within the result is
     deterministic (sorted by node_id) so concurrent writers converge.
+
+    Entries carrying `cleared_fields: [...]` apply as a field-level diff
+    instead of a full replace: those fields are removed from the prior
+    entry. If the merged result has only `node_id` left, the node is
+    evicted from the overlay entirely — that's how the client says "delete
+    my overlay entry for this node" when the only content was a comment
+    the user just cleared.
     """
     by_id: dict[str, dict] = {}
     for entry in existing:
         if isinstance(entry, dict) and isinstance(entry.get("node_id"), str):
             by_id[entry["node_id"]] = entry
     for entry in incoming:
-        by_id[entry["node_id"]] = entry
+        nid = entry["node_id"]
+        if entry.get("cleared_fields"):
+            merged = _apply_clears_to_existing(by_id.get(nid), entry)
+            if merged is None:
+                by_id.pop(nid, None)
+            else:
+                by_id[nid] = merged
+        else:
+            by_id[nid] = entry
     return sorted(by_id.values(), key=lambda e: e["node_id"])
 
 
@@ -536,6 +586,17 @@ def record_review_for_session(
                 f"review.reviews[{i}].node_id must be a non-empty string",
                 http_status=400,
             )
+        if "cleared_fields" in entry:
+            cleared = entry["cleared_fields"]
+            allowed = {"new_status", "resolution", "body_edit", "comment"}
+            if not isinstance(cleared, list) or not all(
+                isinstance(f, str) and f in allowed for f in cleared
+            ):
+                raise ReviewError(
+                    f"review.reviews[{i}].cleared_fields must be a list of "
+                    f"strings drawn from {sorted(allowed)}",
+                    http_status=400,
+                )
 
     base_revision_raw = review.get("base_revision")
     has_base = "base_revision" in review and base_revision_raw is not None
@@ -602,9 +663,12 @@ def record_review_for_session(
 
         # Drop entries whose only field is node_id — they would silently clobber
         # a prior real review for the same node on merge. Schema rule: "Entries
-        # with all fields null/empty are dropped silently."
+        # with all fields null/empty are dropped silently." Entries carrying a
+        # `cleared_fields` marker are intentional overlay-deletion signals
+        # (ADR-0011) and pass through even when otherwise empty.
         filtered_incoming = [
-            entry for entry in incoming_reviews if not apply_mod.is_empty_entry(entry)
+            entry for entry in incoming_reviews
+            if not apply_mod.is_empty_entry(entry) or entry.get("cleared_fields")
         ]
 
         # Per-node staleness split. CLI path (no base_revision) accepts everything.
@@ -857,6 +921,13 @@ def _render_session_html(
         return HTTPStatus.CONFLICT, _render_invalid_session_html(sid, errors)
     md_text = md_bytes.decode("utf-8")
     bodies = render.parse_anchored_bodies(md_text)
+    # Snapshot canonical (pre-overlay) status + ambiguity resolution BEFORE
+    # _apply_overlay_to_spec mutates node["status"]/["resolution"] in place
+    # (ADR-0011 amendment). Client uses this to detect snap-back-to-canonical
+    # and route the diff into cleared_fields. STATUS_BY_ID on the page is the
+    # post-merge view, so it cannot serve this role.
+    canonical_by_id = _snapshot_canonical(spec)
+    overlay_entries = _apply_overlay_to_spec(sid, cur, spec, bodies)
     return HTTPStatus.OK, render.build_html(
         spec,
         bodies,
@@ -864,7 +935,91 @@ def _render_session_html(
         submit_token=submit_token,
         session_id=sid,
         base_revision=cur,
+        overlay_entries=overlay_entries,
+        canonical_by_id=canonical_by_id,
     )
+
+
+def _snapshot_canonical(spec: dict) -> dict[str, dict]:
+    """Snapshot canonical status + ambiguity resolution per node.
+
+    Must be called BEFORE _apply_overlay_to_spec mutates the node dicts.
+    Shape: ``{nid: {"status": <str>, "resolution": <dict|null>}}`` — the
+    resolution key is present only for ambiguity nodes (decisions/risks
+    do not carry a resolution field). Used by the daemon-served render
+    path to expose canonical to the client (ADR-0011 amendment).
+    """
+    out: dict[str, dict] = {}
+    nodes = spec.get("nodes") if isinstance(spec, dict) else None
+    if not isinstance(nodes, list):
+        return out
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        nid = node.get("id")
+        if not isinstance(nid, str):
+            continue
+        entry: dict = {"status": node.get("status")}
+        if node.get("kind") == "ambiguity":
+            res = node.get("resolution")
+            entry["resolution"] = res if isinstance(res, dict) else None
+        out[nid] = entry
+    return out
+
+
+def _apply_overlay_to_spec(
+    sid: str, cur: int, spec: dict, bodies: dict[str, str]
+) -> dict[str, dict]:
+    """Merge the current revision's submitted review (the website's overlay)
+    into the in-memory spec + bodies before render.
+
+    Status, resolution, and body_edit fields land on the node / bodies dicts
+    directly so the renderer's existing prefill picks them up. The full per-
+    node overlay entries are also returned to the renderer so the client can
+    emit complete entries on partial-field edits — without that, the daemon's
+    by-node-id replace-merge would silently drop other already-submitted
+    overlay fields (ADR-0011). Comments are tracked as part of the overlay
+    entry; they prefill the textarea baseline without leaking into
+    `node.review.comment` on the stored sidecar.
+    """
+    overlay_path = session_dir(sid) / "reviews" / str(cur) / "review.json"
+    if not overlay_path.exists():
+        return {}
+    try:
+        doc = json.loads(overlay_path.read_text("utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    entries = doc.get("reviews") if isinstance(doc, dict) else None
+    if not isinstance(entries, list):
+        return {}
+    nodes = spec.get("nodes") if isinstance(spec, dict) else None
+    if not isinstance(nodes, list):
+        return {}
+    node_by_id = {n["id"]: n for n in nodes if isinstance(n, dict) and "id" in n}
+
+    overlay_entries: dict[str, dict] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        nid = entry.get("node_id")
+        if not isinstance(nid, str):
+            continue
+        node = node_by_id.get(nid)
+        if node is None:
+            continue
+        overlay_entries[nid] = entry
+        new_status = entry.get("new_status")
+        if isinstance(new_status, str) and new_status:
+            node["status"] = new_status
+        resolution = entry.get("resolution")
+        if node.get("kind") == "ambiguity" and isinstance(resolution, dict):
+            node["resolution"] = resolution
+        body_edit = entry.get("body_edit")
+        if isinstance(body_edit, str):
+            anchor = node.get("source_anchor", nid)
+            if isinstance(anchor, str):
+                bodies[anchor] = body_edit
+    return overlay_entries
 
 
 def _render_invalid_session_html(sid: str, errors: list[str]) -> str:

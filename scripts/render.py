@@ -224,6 +224,8 @@ def build_html(
     submit_token: str = "",
     session_id: str | None = None,
     base_revision: int | None = None,
+    overlay_entries: dict[str, dict] | None = None,
+    canonical_by_id: dict[str, dict] | None = None,
 ) -> str:
     ordered = topo_order(spec["nodes"])
     affects = compute_affects(spec["nodes"])
@@ -257,11 +259,20 @@ def build_html(
         "base_revision": base_revision,
     })
     submit_payload = submit_payload.replace("</", "<\\/")
+    overlay_payload = json.dumps(overlay_entries or {})
+    overlay_payload = overlay_payload.replace("</", "<\\/")
+    # Standalone render (canonical_by_id=None) emits {} — the client falls
+    # back to n.status (which IS canonical when no overlay merge has run).
+    # ADR-0011 amendment: daemon-served path always passes a populated map.
+    canonical_payload = json.dumps(canonical_by_id or {})
+    canonical_payload = canonical_payload.replace("</", "<\\/")
     return TEMPLATE.replace("__TITLE__", title) \
         .replace("__SPEC_ID__", spec_id) \
         .replace("__VERSION__", str(spec["version"])) \
         .replace("__PAYLOAD__", payload_json) \
         .replace("__SUBMIT__", submit_payload) \
+        .replace("__OVERLAY_ENTRIES__", overlay_payload) \
+        .replace("__CANONICAL_BY_ID__", canonical_payload) \
         .replace("__GENERATED_AT__", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
@@ -832,10 +843,39 @@ __PAYLOAD__
 <script type="application/json" id="submit-config">
 __SUBMIT__
 </script>
+<script type="application/json" id="overlay-entries">
+__OVERLAY_ENTRIES__
+</script>
+<script type="application/json" id="canonical-by-id">
+__CANONICAL_BY_ID__
+</script>
 
 <script>
 (function() {
   const SPEC = JSON.parse(document.getElementById("spec-payload").textContent);
+  // Slice 1: per-node overlay entries from the daemon's submitted review.json.
+  // Used to (a) baseline the comment textarea for reload-prefill, and (b)
+  // compose full effective entries on partial-field edits so the daemon's
+  // by-node-id replace-merge cannot silently drop other already-submitted
+  // overlay fields (status / resolution / body_edit). Empty {} on standalone
+  // render. The variable is `let` because successful submits advance it in
+  // place so a follow-up edit on the same page composes against the new
+  // overlay, not the page-load snapshot.
+  let OVERLAY_BY_ID = {};
+  try {
+    OVERLAY_BY_ID = JSON.parse(document.getElementById("overlay-entries").textContent) || {};
+  } catch (_) { OVERLAY_BY_ID = {}; }
+
+  // ADR-0011 amendment: canonical (pre-overlay) status + ambiguity resolution
+  // exposed by the daemon as a parallel JSON island. Used by buildEntryForNode
+  // to detect snap-back-to-canonical and route the diff into cleared_fields so
+  // the server's overlay merge evicts the node rather than persisting a no-op.
+  // Empty {} in standalone mode (no daemon, no overlay merge) — JS helpers
+  // below fall back to n.status, which IS canonical in that mode.
+  let CANONICAL_BY_ID = {};
+  try {
+    CANONICAL_BY_ID = JSON.parse(document.getElementById("canonical-by-id").textContent) || {};
+  } catch (_) { CANONICAL_BY_ID = {}; }
 
   // Status dropdown options. Every status from the node's enum is selectable
   // so the form can pre-fill to the current applied status (slice 2). The
@@ -877,8 +917,11 @@ __SUBMIT__
   // look touched and Submit-all would re-POST the entire spec.
   const APPLIED_BY_ID = {};
   SPEC.nodes.forEach(n => {
+    const overlay = OVERLAY_BY_ID[n.id] || {};
+    const overlayComment = overlay.comment;
     APPLIED_BY_ID[n.id] = {
       status: n.status,
+      comment: typeof overlayComment === "string" ? overlayComment : "",
       resolution: (n.kind === "ambiguity" && n.resolution && typeof n.resolution === "object")
         ? { choice_id: n.resolution.choice_id || null,
             freeform: n.resolution.freeform || null }
@@ -893,7 +936,7 @@ __SUBMIT__
     const applied = APPLIED_BY_ID[n.id];
     state[n.id] = {
       new_status: applied.status,
-      comment: "",
+      comment: applied.comment,
       body_edit: null,
       resolution: applied.resolution
         ? { choice_id: applied.resolution.choice_id,
@@ -950,15 +993,30 @@ __SUBMIT__
     return aFree === bFree;
   }
 
-  // Slice 2: touched = state differs from APPLIED_BY_ID for that node.
-  // Empty resolution state matches null applied resolution. Comment is
-  // per-cycle (never persistent) so any non-empty comment counts as touched.
+  // Canonical lookups. Daemon-served pages populate CANONICAL_BY_ID for every
+  // node; standalone pages emit {} so we fall back to n.status (which is
+  // canonical in standalone since no overlay merge mutates it).
+  function canonicalStatus(nid) {
+    const c = CANONICAL_BY_ID[nid];
+    if (c && typeof c.status === "string") return c.status;
+    return STATUS_BY_ID[nid];
+  }
+  function canonicalResolution(nid) {
+    const c = CANONICAL_BY_ID[nid];
+    if (c && Object.prototype.hasOwnProperty.call(c, "resolution")) return c.resolution;
+    return null;
+  }
+
+  // Slice 1+2: touched = state differs from APPLIED_BY_ID for that node.
+  // Empty resolution state matches null applied resolution. Comment baseline
+  // comes from the daemon overlay (last submitted comment for this node);
+  // touched only if the textarea differs from that baseline.
   function isTouchedNode(nid) {
     const s = state[nid];
     const applied = APPLIED_BY_ID[nid];
     if (!s || !applied) return false;
     if (s.new_status !== applied.status) return true;
-    if (s.comment && s.comment.trim().length > 0) return true;
+    if ((s.comment || "").trim() !== (applied.comment || "").trim()) return true;
     if (s.body_edit) return true;
     if (!resolutionsEqual(s.resolution, applied.resolution)) return true;
     return false;
@@ -1240,8 +1298,11 @@ __SUBMIT__
           } else {
             cardStatusEl.textContent = "Submitted (rev " + (data.current_revision || data.revision || "?") + ", " + (data.review_count || 1) + " on server)";
             cardStatusEl.classList.add("ok");
-            // Slice 3: clear the just-submitted entry from state + storage so
-            // a reload doesn't re-show it as an unsubmitted draft.
+            // Advance the in-memory baseline so the form reflects what is
+            // now on the server. Without this, resetNodeStateToApplied below
+            // would snap the form back to the page-load baseline, briefly
+            // hiding the accepted edit until the next reload.
+            advanceBaselineFromEntry(entry);
             resetNodeStateToApplied(node.id);
             resyncCardDom(node.id);
             saveDraft();
@@ -1389,35 +1450,111 @@ __SUBMIT__
 
   function buildEntryForNode(n) {
     const s = state[n.id];
-    const applied = APPLIED_BY_ID[n.id] || { status: "", resolution: null };
+    const applied = APPLIED_BY_ID[n.id] || { status: "", comment: "", resolution: null };
     const statusDiff = s.new_status !== applied.status;
-    const hasComment = Boolean(s.comment && s.comment.trim());
+    const trimmedComment = (s.comment || "").trim();
+    const appliedComment = (applied.comment || "").trim();
+    const commentDiff = trimmedComment !== appliedComment;
     const resolutionDiff = !resolutionsEqual(s.resolution, applied.resolution);
-    // Slice 2: no-diff entries are dropped client-side before POST. The
-    // responder's deci-noop-on-pure-status-confirm covers any residual case
-    // where a non-trivial entry still resolves to pure approval at apply time.
-    if (!statusDiff && !hasComment && !resolutionDiff) return null;
-    // Validity check: if the effective status (post-change) is "resolved" for
-    // an ambiguity, a valid resolution must be present in state.
-    const effectiveStatus = statusDiff ? s.new_status : applied.status;
-    if (n.kind === "ambiguity" && effectiveStatus === "resolved") {
+    // Touched check — no-op if state matches the merged baseline.
+    if (!statusDiff && !commentDiff && !resolutionDiff && !s.body_edit) return null;
+    // Validity: ambiguity with effective status "resolved" needs a resolution.
+    if (n.kind === "ambiguity" && s.new_status === "resolved") {
       const hasValidResolution = s.resolution && (
         (s.resolution.choice_id) ||
         (s.resolution.freeform && s.resolution.freeform.trim())
       );
       if (!hasValidResolution) return "invalid";
     }
+    // Compose a FULL effective overlay entry. The daemon's same-revision
+    // merge replaces the prior entry by node_id, so a sparse diff would
+    // silently drop other already-submitted overlay fields. Start from the
+    // existing overlay entry, then layer the user's changes on top. Fields
+    // the user did not touch are carried through from OVERLAY_BY_ID.
+    const existing = OVERLAY_BY_ID[n.id] || {};
     const entry = { node_id: n.id };
-    if (statusDiff) entry.new_status = s.new_status;
-    if (resolutionDiff && s.resolution) {
-      const r = {};
-      if (s.resolution.choice_id) r.choice_id = s.resolution.choice_id;
-      if (s.resolution.freeform && s.resolution.freeform.trim()) {
-        r.freeform = s.resolution.freeform.trim();
-      }
-      if (Object.keys(r).length > 0) entry.resolution = r;
+    // new_status: user's value if they changed it, else preserve existing.
+    if (statusDiff) {
+      entry.new_status = s.new_status;
+    } else if (typeof existing.new_status === "string" && existing.new_status) {
+      entry.new_status = existing.new_status;
     }
-    if (hasComment) entry.comment = s.comment.trim();
+    // resolution: user's value if changed; else preserve existing.
+    if (resolutionDiff) {
+      if (s.resolution) {
+        const r = {};
+        if (s.resolution.choice_id) r.choice_id = s.resolution.choice_id;
+        if (s.resolution.freeform && s.resolution.freeform.trim()) {
+          r.freeform = s.resolution.freeform.trim();
+        }
+        if (Object.keys(r).length > 0) entry.resolution = r;
+      }
+    } else if (existing.resolution && typeof existing.resolution === "object") {
+      entry.resolution = existing.resolution;
+    }
+    // body_edit: user's value if they edited; else preserve existing.
+    if (s.body_edit) {
+      entry.body_edit = s.body_edit;
+    } else if (typeof existing.body_edit === "string") {
+      entry.body_edit = existing.body_edit;
+    }
+    // comment: state value is canonical here. Empty comment intentionally
+    // clears the overlay's prior comment (user explicitly emptied the box).
+    if (trimmedComment) entry.comment = trimmedComment;
+    // Snap-back-to-canonical (ADR-0011 amendment). If the user dragged a
+    // field back to its canonical value, including it as a value is a no-op
+    // overlay — drop it and list the field in `cleared_fields` so the
+    // server's overlay merge evicts the field (or the whole node if nothing
+    // remains). Canonical comes from CANONICAL_BY_ID (daemon path) or
+    // STATUS_BY_ID fallback (standalone, where node.status IS canonical).
+    const clearedFields = [];
+    if (typeof entry.new_status === "string"
+        && entry.new_status === canonicalStatus(n.id)) {
+      clearedFields.push("new_status");
+      delete entry.new_status;
+    }
+    if (n.kind === "ambiguity"
+        && resolutionDiff
+        && resolutionsEqual(s.resolution, canonicalResolution(n.id))) {
+      // `entry.resolution` may be absent here (user cleared resolution and
+      // canonical is null). Always list it so field-merge doesn't preserve
+      // a stale prior-overlay resolution.
+      clearedFields.push("resolution");
+      delete entry.resolution;
+    }
+    // Field-merge edge: when `cleared_fields` is present, the server's merge
+    // PRESERVES any prior-overlay field the entry doesn't mention. So when
+    // the user intentionally removed a field (empty comment, dropped
+    // resolution) we must also list it — otherwise the prior overlay value
+    // survives. The conditions below mirror the "user removed this" cases
+    // not already handled by snap-back above.
+    if (commentDiff && !trimmedComment && existing.comment !== undefined
+        && clearedFields.indexOf("comment") === -1) {
+      clearedFields.push("comment");
+    }
+    if (resolutionDiff && entry.resolution === undefined && existing.resolution !== undefined
+        && clearedFields.indexOf("resolution") === -1) {
+      clearedFields.push("resolution");
+    }
+    // If the composed entry has no meaningful fields but there IS an
+    // existing overlay entry for this node, the user effectively cleared
+    // the overlay (e.g. cleared a comment-only entry). The daemon's
+    // empty-entry filter would otherwise drop this submit and the stale
+    // overlay comment would survive on reload. Carry an explicit
+    // `cleared_fields` marker so the daemon's overlay merge path knows to
+    // evict the node (ADR-0011).
+    const meaningfulKeys = ["new_status", "resolution", "body_edit", "comment"];
+    const isEmpty = !meaningfulKeys.some(k => entry[k] !== undefined);
+    if (isEmpty && clearedFields.length === 0) {
+      const existingKeys = Object.keys(existing).filter(k => k !== "node_id");
+      if (existingKeys.length > 0) {
+        existingKeys.forEach(k => clearedFields.push(k));
+      } else {
+        // No overlay existed and no meaningful diff produced — nothing to submit.
+        return null;
+      }
+    }
+    if (clearedFields.length > 0) entry.cleared_fields = clearedFields;
     return entry;
   }
 
@@ -1563,12 +1700,82 @@ __SUBMIT__
     const applied = APPLIED_BY_ID[nid];
     if (!applied || !state[nid]) return;
     state[nid].new_status = applied.status;
-    state[nid].comment = "";
+    state[nid].comment = applied.comment || "";
     state[nid].body_edit = null;
     state[nid].resolution = applied.resolution
       ? { choice_id: applied.resolution.choice_id,
           freeform: applied.resolution.freeform }
       : null;
+  }
+  // Slice 1: after the daemon accepts a submitted entry, advance the
+  // in-memory overlay + applied baselines so subsequent edits on this page
+  // compose against the new server state, not against the page-load
+  // snapshot. The submitted `entry` is the full effective overlay entry
+  // (see buildEntryForNode); apply the same field-clear semantics here
+  // that the daemon uses on disk so the page stays consistent without a
+  // reload.
+  function advanceBaselineFromEntry(entry) {
+    if (!entry || typeof entry !== "object" || !entry.node_id) return;
+    const nid = entry.node_id;
+    const node = SPEC.nodes.find(x => x.id === nid);
+    const cleared = Array.isArray(entry.cleared_fields) ? entry.cleared_fields : [];
+    if (cleared.length > 0) {
+      const prior = OVERLAY_BY_ID[nid] || {};
+      const merged = Object.assign({}, prior);
+      cleared.forEach(f => { delete merged[f]; });
+      ["new_status", "resolution", "body_edit", "comment"].forEach(f => {
+        if (entry[f] !== undefined) merged[f] = entry[f];
+      });
+      const meaningfulKeys = Object.keys(merged).filter(k => k !== "node_id");
+      if (meaningfulKeys.length === 0) {
+        delete OVERLAY_BY_ID[nid];
+      } else {
+        merged.node_id = nid;
+        OVERLAY_BY_ID[nid] = merged;
+      }
+    } else {
+      OVERLAY_BY_ID[nid] = entry;
+    }
+    const applied = APPLIED_BY_ID[nid];
+    if (!applied) return;
+    const newOverlay = OVERLAY_BY_ID[nid];
+    // Status: overlay value wins; otherwise snap APPLIED + STATUS_BY_ID back
+    // to canonical so subsequent edits on the same page diff against the
+    // real post-submit state (ADR-0011 amendment — canonical now exposed
+    // via CANONICAL_BY_ID, so the cleared/evicted path can rebase locally
+    // instead of waiting for a reload).
+    if (newOverlay && typeof newOverlay.new_status === "string" && newOverlay.new_status) {
+      applied.status = newOverlay.new_status;
+      STATUS_BY_ID[nid] = newOverlay.new_status;
+    } else {
+      const canon = canonicalStatus(nid);
+      if (typeof canon === "string") {
+        applied.status = canon;
+        STATUS_BY_ID[nid] = canon;
+      }
+    }
+    if (newOverlay && newOverlay.resolution && typeof newOverlay.resolution === "object") {
+      applied.resolution = {
+        choice_id: newOverlay.resolution.choice_id || null,
+        freeform: newOverlay.resolution.freeform || null,
+      };
+    } else if (node && node.kind === "ambiguity") {
+      // Overlay no longer carries a resolution — restore canonical (may
+      // itself be null/absent for unresolved ambiguities; for ambiguities
+      // canonically resolved in the spec we restore the real object so the
+      // next edit composes correctly without a reload).
+      const canonRes = canonicalResolution(nid);
+      if (canonRes && typeof canonRes === "object") {
+        applied.resolution = {
+          choice_id: canonRes.choice_id || null,
+          freeform: canonRes.freeform || null,
+        };
+      } else {
+        applied.resolution = null;
+      }
+    }
+    applied.comment = (newOverlay && typeof newOverlay.comment === "string")
+      ? newOverlay.comment : "";
   }
   function resyncCardDom(nid) {
     const card = document.getElementById("card-" + nid);
@@ -1723,7 +1930,10 @@ __SUBMIT__
             // landed unless the call errored.
             built.delta.reviews.forEach(r => acceptedIds.add(r.node_id));
           }
+          const entryByNodeId = {};
+          built.delta.reviews.forEach(r => { entryByNodeId[r.node_id] = r; });
           acceptedIds.forEach(nid => {
+            advanceBaselineFromEntry(entryByNodeId[nid]);
             resetNodeStateToApplied(nid);
             resyncCardDom(nid);
           });
