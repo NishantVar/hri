@@ -42,6 +42,18 @@ A registered review thread for one spec (one `spec_id` + basename), stored under
 **Revision**:
 A numbered snapshot of a spec inside a session (`revisions/N/source.md` + `decisions.json`). Distinct from `version` on the sidecar — `version` is the applier's bumped counter; `revision` is the daemon's submission counter.
 
+**Base revision**:
+The `revision` number the reviewer's draft was rendered against. Every POST to `/sessions/<id>/review` carries `base_revision`; the daemon uses it to decide which revision's sidecar to fingerprint-diff against. If the session has rolled forward (`current_revision > base_revision`), each entry is accepted only if its per-node fingerprint still matches.
+
+**Fingerprint**:
+A `sha256` over a node's reviewer-visible fields (`kind`, `title`, `status`, `source_anchor`, `depends_on`, kind-specific fields, and `body_md` from the anchor block in `source.md`). The daemon computes it server-side from its own stored revision snapshots — at both `base_revision` and `current_revision` — when a POST arrives. A mismatch means the node changed under the reviewer and the entry goes into `conflicts` instead of being merged. The client never sends fingerprints; it only sends `base_revision`.
+
+**Draft**:
+The reviewer's unsent edits, persisted in browser localStorage as a sparse diff against the spec's currently applied state. Keyed by `riview:draft:<sid>:<base_revision>` (daemon session pages) or `riview:draft:standalone:<spec_id>:<version>` (standalone-render pages). Cleared per-entry on successful submit; storage retains draft keys for the latest five revision numbers per session (older revision keys are evicted on next render).
+
+**Responder**:
+An agent following the `riview-respond` skill, running attached in a terminal, that waits on a Session, pulls the current Review delta, updates the project Spec in place, and submits the next Revision. It resumes from session state and uses stale-review + preflight checks; it is not a daemon worker.
+
 **Session inbox**:
 The daemon's cross-project store at `~/.riview/`. Holds many sessions (from many projects) and serves them on one localhost port.
 

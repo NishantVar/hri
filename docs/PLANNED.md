@@ -2,21 +2,13 @@
 
 Short list of things we know we want to build but haven't. Delete entries as they land.
 
-## `riview-respond` Claude skill (slice 2e)
+## Body-edit UI in the rendered form
 
-A Claude/agent skill (target path on the user's machine: `~/.claude/skills/riview-respond/`) that turns a session id into a one-shot review submission.
+The schema and `apply.py` both support `body_edit` (a per-node body markdown override that lands inside the anchor block), but the rendered review form has no widget to author one. Adding it would need:
 
-Rough shape, to be designed together:
+- A textarea per card (collapsed by default; opens on a "Edit body" button so it doesn't dominate the card layout).
+- Touched-detection that diffs against the node's current `body_md` from the anchor (the renderer already extracts these via `parse_anchored_bodies`).
+- A way to preview the markdown before submitting — the prose body is wider than a comment, and reviewers will want to see it rendered, not just typed.
+- A draft-persistence story consistent with ADR-0009 (sparse diff against applied body_md, not against empty).
 
-- Input: a session id (and optionally a hint like "focus on the open ambiguities").
-- Behaviour: pull the current revision's spec via the daemon (or the CLI), read the markdown + decisions JSON, propose a review delta (new statuses, resolutions for ambiguities, body edits where useful), and POST it back to `/sessions/<id>/review`.
-- Output: a short summary of what it decided per node, plus the path of the review JSON it submitted.
-
-Open design questions when we pick this up:
-
-1. **Granularity.** One submission per skill invocation (the simple model), or stream per-card decisions as it goes (matches the per-card submit UX, more LLM calls)?
-2. **Reuse vs new code.** The renderer's `validate()` and `apply.py`'s `is_empty_entry()` are already the canonical truth for what makes a delta well-formed; the skill should call them, not re-implement.
-3. **Transport.** Daemon-only (POST to `/sessions/<id>/review`), or also support an offline mode that reads a local spec directory and writes a review JSON to disk for `apply.py`? The daemon path is simpler; the offline path keeps the skill useful when the daemon isn't running.
-
-Until then, agents that want to submit reviews use the CLI:
-`python3 scripts/riview.py submit-review <id> /path/to/review.json`.
+Reviewer-as-agent already produces `body_edit` programmatically via the CLI; this item is only about giving human reviewers parity.

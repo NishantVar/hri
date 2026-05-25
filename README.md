@@ -113,14 +113,17 @@ Override the storage root with `RIVIEW_HOME=/path/to/dir` (tests use this).
 
 ### Session lifecycle
 
-- `awaiting_review` — a revision has been submitted but no review exists for it yet.
-- `review_submitted` — a review has been recorded against the current revision.
-- `applied` — the agent has picked the review up (either by calling `applied` explicitly or by submitting a newer revision).
-- `closed` — manually dismissed.
+- `awaiting_review` — a revision has been submitted but no review exists for it yet. Set by `submit` on every revision (including responder follow-ups).
+- `review_submitted` — a review has been recorded against the current revision. Set by `POST /sessions/<id>/review` and the `submit-review` CLI.
+- `applied` — the session has been explicitly finalized via `riview applied <id>` (no more responder cycles expected). Not used by the responder loop — submitting a new revision is the per-cycle consumption boundary and leaves status at `awaiting_review` for the new revision.
+- `closed` — manually dismissed via `riview dismiss <id>`.
 
 `pull` is **idempotent**: it returns the latest submitted review for the current
-revision every call, never consumes. The agent advances the session forward by
-submitting a new revision with `--session <id>` after applying the review.
+revision every call, never consumes. The responder loop advances the session by
+submitting a new revision with `--session <id>` after writing the planned edits;
+that submit is itself the "consumed N's review" signal, no extra command needed.
+See [skills/riview-respond/SKILL.md](skills/riview-respond/SKILL.md) for the
+canonical responder loop.
 
 ### CLI
 
@@ -180,11 +183,24 @@ Routes:
 - `GET /sessions/<id>` — per-session review UI (the existing `render.py` HTML,
   with a "Submit to RIView server" button wired up).
 - `POST /sessions/<id>/review` — accept a review JSON for the session's
-  current revision. Requires header `X-Riview-Token: <token>`. Reviews are
-  **merged by `node_id`** (upsert): the incoming `reviews[]` entries overwrite
-  any prior entry for the same node, and untouched nodes from previous POSTs
-  are preserved. The merged list is re-sorted by `node_id` before write.
-  This lets the UI submit one decision at a time without losing earlier work.
+  current revision. Requires header `X-Riview-Token: <token>`. The body **must**
+  include `base_revision` (the session revision the page rendered against);
+  the daemon rejects HTTP POSTs without it (400). Reviews are **merged by
+  `node_id`** (upsert): the incoming `reviews[]` entries overwrite any prior
+  entry for the same node, and untouched nodes from previous POSTs are
+  preserved. The merged list is re-sorted by `node_id` before write. This lets
+  the UI submit one decision at a time without losing earlier work.
+
+  When `base_revision != current_revision` (the responder rolled the session
+  forward while the reviewer was typing), each incoming entry is checked with
+  a per-node fingerprint diff against the stored snapshots: matching entries
+  are accepted into the current revision's review, mismatching entries are
+  returned in `conflicts` and never merged. The response shape is:
+  `{accepted: [{node_id}], conflicts: [{node_id, reason, base_revision,
+  current_revision}], base_revision, current_revision, review_count,
+  event_seq}`. The persisted review file is always normalized to the current
+  revision (`spec_version` rewritten; `base_revision` stripped). See
+  [ADR-0007](docs/adr/0007-per-node-stale-submit-acceptance.md).
 - `GET /sessions/<id>/wait?since=<n>&timeout=<s>` — long-poll. Returns 200
   with the session event snapshot as soon as `meta.event_seq > since`, or
   204 on timeout. Default timeout 25s, max 60s. `event_seq` is a monotonic
@@ -209,6 +225,12 @@ Browser UI behavior:
 - Cards are ordered topologically by `depends_on`, with ties broken by id.
   Each card shows `depends on` / `affects` chips that scroll to the referenced
   card on click.
+- Each card is **prefilled with the node's current applied state** — status
+  dropdown shows the persisted status, ambiguity resolution shows the persisted
+  choice/freeform. The comment textarea is per-cycle and stays blank. Touched-
+  detection diffs against the applied state, so re-selecting the status that's
+  already set does not mark the card touched. See
+  [ADR-0008](docs/adr/0008-form-prefills-with-applied-state.md).
 - A `↑ upstream changed` badge appears on a downstream card the moment any
   direct upstream's form has unsubmitted changes — a hint that the reviewer
   may want to revisit the downstream decision once the upstream lands.
@@ -216,10 +238,37 @@ Browser UI behavior:
   entry; the server merges it with any prior reviews for the same revision.
   The footer **Submit all** button POSTs every dirty card in one go. Both
   paths are available so the reviewer can pick fast-feedback or batch.
+- **Drafts persist in localStorage** keyed by `riview:draft:<sid>:<base_revision>`
+  (or `riview:draft:standalone:<spec_id>:<version>`), stored as a sparse diff
+  against the applied state. Closing and reopening the tab restores the
+  reviewer's unsent edits. Successful submit clears the corresponding entries;
+  the latest five revision numbers' drafts are retained per session. See
+  [ADR-0009](docs/adr/0009-localstorage-draft-persistence.md).
 - The page opens an SSE connection to `/sessions/<id>/events`. When the
-  agent submits a new revision, a "Spec updated to revision N — Reload"
-  banner appears. The reload button uses the View Transitions API when
-  available and respects `prefers-reduced-motion`.
+  responder submits a new revision (a material upstream change), a "Spec
+  updated to revision N — Reload" banner appears. The reload button uses the
+  View Transitions API when available and respects `prefers-reduced-motion`.
+  If the reviewer submits during a rolled-forward revision, per-node
+  fingerprint diffs (ADR-0007) decide which entries still apply; conflicts
+  are surfaced inline on the affected cards.
+
+### Responder loop
+
+A responder is an agent that closes the review loop: it waits on a session,
+pulls the reviewer's latest delta, edits the project spec in place, and
+submits the next revision. The canonical responder is the
+[`riview-respond` Claude Code skill](skills/riview-respond/SKILL.md), which
+lives in this repo and is installed with a symlink:
+
+```sh
+ln -s "$RIVIEW_REPO/skills/riview-respond" ~/.claude/skills/riview-respond
+```
+
+`/riview-respond <session_id>` (in any Claude Code terminal) then runs the
+loop. Cycle structure: `wait` → `pull` → plan write set → stale-review
+re-snapshot guard → preflight drift check → write spec pair in place →
+`submit`. See [ADR-0010](docs/adr/0010-responder-skill-lives-in-repo.md) for
+why the skill is in the repo, not in `~/.claude/skills/`.
 
 Smoke tests:
 
