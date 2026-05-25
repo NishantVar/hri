@@ -224,6 +224,7 @@ def build_html(
     submit_token: str = "",
     session_id: str | None = None,
     base_revision: int | None = None,
+    overlay_comments: dict[str, str] | None = None,
 ) -> str:
     ordered = topo_order(spec["nodes"])
     affects = compute_affects(spec["nodes"])
@@ -257,11 +258,14 @@ def build_html(
         "base_revision": base_revision,
     })
     submit_payload = submit_payload.replace("</", "<\\/")
+    overlay_payload = json.dumps(overlay_comments or {})
+    overlay_payload = overlay_payload.replace("</", "<\\/")
     return TEMPLATE.replace("__TITLE__", title) \
         .replace("__SPEC_ID__", spec_id) \
         .replace("__VERSION__", str(spec["version"])) \
         .replace("__PAYLOAD__", payload_json) \
         .replace("__SUBMIT__", submit_payload) \
+        .replace("__OVERLAY_COMMENTS__", overlay_payload) \
         .replace("__GENERATED_AT__", datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
@@ -832,10 +836,21 @@ __PAYLOAD__
 <script type="application/json" id="submit-config">
 __SUBMIT__
 </script>
+<script type="application/json" id="overlay-comments">
+__OVERLAY_COMMENTS__
+</script>
 
 <script>
 (function() {
   const SPEC = JSON.parse(document.getElementById("spec-payload").textContent);
+  // Slice 1: per-node comment baseline from the daemon's submitted overlay.
+  // Comments are tracked as a separate baseline (not merged into
+  // node.review.comment) so reload-prefill works without rewriting the
+  // applier's invariants. Empty {} on standalone render.
+  let OVERLAY_COMMENTS = {};
+  try {
+    OVERLAY_COMMENTS = JSON.parse(document.getElementById("overlay-comments").textContent) || {};
+  } catch (_) { OVERLAY_COMMENTS = {}; }
 
   // Status dropdown options. Every status from the node's enum is selectable
   // so the form can pre-fill to the current applied status (slice 2). The
@@ -877,8 +892,10 @@ __SUBMIT__
   // look touched and Submit-all would re-POST the entire spec.
   const APPLIED_BY_ID = {};
   SPEC.nodes.forEach(n => {
+    const overlayComment = OVERLAY_COMMENTS[n.id];
     APPLIED_BY_ID[n.id] = {
       status: n.status,
+      comment: typeof overlayComment === "string" ? overlayComment : "",
       resolution: (n.kind === "ambiguity" && n.resolution && typeof n.resolution === "object")
         ? { choice_id: n.resolution.choice_id || null,
             freeform: n.resolution.freeform || null }
@@ -893,7 +910,7 @@ __SUBMIT__
     const applied = APPLIED_BY_ID[n.id];
     state[n.id] = {
       new_status: applied.status,
-      comment: "",
+      comment: applied.comment,
       body_edit: null,
       resolution: applied.resolution
         ? { choice_id: applied.resolution.choice_id,
@@ -950,15 +967,16 @@ __SUBMIT__
     return aFree === bFree;
   }
 
-  // Slice 2: touched = state differs from APPLIED_BY_ID for that node.
-  // Empty resolution state matches null applied resolution. Comment is
-  // per-cycle (never persistent) so any non-empty comment counts as touched.
+  // Slice 1+2: touched = state differs from APPLIED_BY_ID for that node.
+  // Empty resolution state matches null applied resolution. Comment baseline
+  // comes from the daemon overlay (last submitted comment for this node);
+  // touched only if the textarea differs from that baseline.
   function isTouchedNode(nid) {
     const s = state[nid];
     const applied = APPLIED_BY_ID[nid];
     if (!s || !applied) return false;
     if (s.new_status !== applied.status) return true;
-    if (s.comment && s.comment.trim().length > 0) return true;
+    if ((s.comment || "").trim() !== (applied.comment || "").trim()) return true;
     if (s.body_edit) return true;
     if (!resolutionsEqual(s.resolution, applied.resolution)) return true;
     return false;
@@ -1389,14 +1407,16 @@ __SUBMIT__
 
   function buildEntryForNode(n) {
     const s = state[n.id];
-    const applied = APPLIED_BY_ID[n.id] || { status: "", resolution: null };
+    const applied = APPLIED_BY_ID[n.id] || { status: "", comment: "", resolution: null };
     const statusDiff = s.new_status !== applied.status;
-    const hasComment = Boolean(s.comment && s.comment.trim());
+    const trimmedComment = (s.comment || "").trim();
+    const appliedComment = (applied.comment || "").trim();
+    const commentDiff = trimmedComment !== appliedComment;
     const resolutionDiff = !resolutionsEqual(s.resolution, applied.resolution);
-    // Slice 2: no-diff entries are dropped client-side before POST. The
-    // responder's deci-noop-on-pure-status-confirm covers any residual case
-    // where a non-trivial entry still resolves to pure approval at apply time.
-    if (!statusDiff && !hasComment && !resolutionDiff) return null;
+    // Slice 1+2: no-diff entries are dropped client-side before POST. Comment
+    // diff is measured against the overlay baseline so a reload-prefilled
+    // comment doesn't get re-submitted as a fresh edit.
+    if (!statusDiff && !commentDiff && !resolutionDiff) return null;
     // Validity check: if the effective status (post-change) is "resolved" for
     // an ambiguity, a valid resolution must be present in state.
     const effectiveStatus = statusDiff ? s.new_status : applied.status;
@@ -1417,7 +1437,7 @@ __SUBMIT__
       }
       if (Object.keys(r).length > 0) entry.resolution = r;
     }
-    if (hasComment) entry.comment = s.comment.trim();
+    if (commentDiff) entry.comment = trimmedComment;
     return entry;
   }
 
@@ -1563,7 +1583,7 @@ __SUBMIT__
     const applied = APPLIED_BY_ID[nid];
     if (!applied || !state[nid]) return;
     state[nid].new_status = applied.status;
-    state[nid].comment = "";
+    state[nid].comment = applied.comment || "";
     state[nid].body_edit = null;
     state[nid].resolution = applied.resolution
       ? { choice_id: applied.resolution.choice_id,

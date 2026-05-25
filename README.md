@@ -85,7 +85,7 @@ Each `decisions.json` records `applied_from_review.review_path` and `applied_fro
 The file-and-path workflow above is fine for one spec at a time, but multiple
 agents working in parallel need a shared place to drop reviews into. The
 **session inbox** is RIView's cross-project store: each registered review is a
-*session* under `~/.riview/sessions/<session-id>/`, with revisioned spec history
+*session* under `<RIVIEW_HOME>/sessions/<session-id>/`, with revisioned spec history
 (`revisions/N/source.md` + `decisions.json`) and revisioned review history
 (`reviews/N/review.json`).
 
@@ -97,7 +97,7 @@ the daemon.
 ### Layout
 
 ```
-~/.riview/
+<RIVIEW_HOME>/    # defaults to <riview_repo>/.riview/
   sessions/
     <session-id>/
       meta.json              # session_id, project_path, basename, spec_id, spec_title,
@@ -109,7 +109,7 @@ the daemon.
         1/  review.json  submitted_at
 ```
 
-Override the storage root with `RIVIEW_HOME=/path/to/dir` (tests use this).
+Storage root: defaults to **`<riview_repo>/.riview/`** — i.e. the daemon's own checkout. One RIView repo can back many consuming-project agents that submit specs to it. The `.riview/` directory is gitignored. Override with `RIVIEW_HOME=/path/to/dir`; tests use this, and anyone with existing state under `~/.riview/` can keep it by exporting `RIVIEW_HOME=$HOME/.riview`.
 
 ### Session lifecycle
 
@@ -210,7 +210,7 @@ Routes:
   uses this to show "Spec updated — Reload" when the agent submits a new
   revision while a reviewer is mid-form.
 
-The token is generated on first daemon start at `~/.riview/token` (mode 0600)
+The token is generated on first daemon start at `<RIVIEW_HOME>/token` (mode 0600)
 and is read by the daemon to mint same-origin POSTs from the rendered review
 page. The cross-origin POST path is implicitly blocked by browser preflight
 on the custom header. Body size is capped at 1 MiB.

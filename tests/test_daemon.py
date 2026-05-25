@@ -778,6 +778,110 @@ class RiviewDaemonTests(unittest.TestCase):
         self.assertEqual(mode, 0o600)
 
 
+    def test_session_page_renders_overlay_status_and_comment(self):
+        # Slice 1: after a review POST, reloading the session page must reflect
+        # the submitted status + body_edit in the rendered SPEC, and surface
+        # the comment in the overlay-comments JSON island so the textarea
+        # re-prefills on reload.
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "new_status": "confirmed",
+                 "body_edit": "REVIEWED-BODY-MARK", "comment": "Locked in."},
+                {"node_id": "amb-sync", "new_status": "resolved",
+                 "resolution": {"choice_id": "local"},
+                 "comment": "Local-only for v1."},
+            ],
+        })
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+
+        # Overlay-comments JSON island present and includes both comments.
+        marker = '<script type="application/json" id="overlay-comments">'
+        self.assertIn(marker, body)
+        start = body.index(marker) + len(marker)
+        end = body.index("</script>", start)
+        overlay = json.loads(body[start:end])
+        self.assertEqual(overlay.get("deci-platform"), "Locked in.")
+        self.assertEqual(overlay.get("amb-sync"), "Local-only for v1.")
+
+        # Spec payload reflects the merged status / resolution / body.
+        spec_marker = '<script type="application/json" id="spec-payload">'
+        s = body.index(spec_marker) + len(spec_marker)
+        e = body.index("</script>", s)
+        spec_payload = json.loads(body[s:e])
+        nodes_by_id = {n["id"]: n for n in spec_payload["nodes"]}
+        self.assertEqual(nodes_by_id["deci-platform"]["status"], "confirmed")
+        self.assertIn("REVIEWED-BODY-MARK", nodes_by_id["deci-platform"]["_body_md"])
+        self.assertEqual(nodes_by_id["amb-sync"]["status"], "resolved")
+        self.assertEqual(
+            nodes_by_id["amb-sync"]["resolution"].get("choice_id"), "local",
+        )
+
+    def test_session_page_with_no_overlay_renders_empty_overlay_comments(self):
+        # Fresh session, no review.json on disk. Render must not error, and
+        # the overlay-comments island must be the empty object.
+        sid = self._submit_sample()
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        marker = '<script type="application/json" id="overlay-comments">'
+        self.assertIn(marker, body)
+        start = body.index(marker) + len(marker)
+        end = body.index("</script>", start)
+        self.assertEqual(json.loads(body[start:end]), {})
+        # No overlay file should have been materialized just from rendering.
+        overlay_path = Path(self.tmp) / "sessions" / sid / "reviews" / "1" / "review.json"
+        self.assertFalse(overlay_path.exists())
+
+    def test_overlay_does_not_persist_into_node_review_comment(self):
+        # ADR-0011: overlay comments are a separate baseline. They must NOT
+        # be written into node.review.comment on the stored revision sidecar,
+        # otherwise stale comments would survive into the applied spec via
+        # the responder's read path.
+        sid = self._submit_sample()
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "deci-platform", "comment": "draft note"},
+            ],
+        })
+        urllib.request.urlopen(self.base + f"/sessions/{sid}").read()
+        sidecar_path = Path(self.tmp) / "sessions" / sid / "revisions" / "1" / "decisions.json"
+        sidecar = json.loads(sidecar_path.read_text("utf-8"))
+        plat = next(n for n in sidecar["nodes"] if n["id"] == "deci-platform")
+        # Either no review block, or review.comment is not the overlay text.
+        review_block = plat.get("review") or {}
+        self.assertNotEqual(review_block.get("comment"), "draft note")
+
+
+class RiviewStorageRootTests(unittest.TestCase):
+    """Slice 0: storage root precedence — repo-local default, env override."""
+
+    def test_default_is_repo_local(self):
+        # Importing the module fresh with no RIVIEW_HOME set should resolve
+        # the storage root to <riview_repo>/.riview/ (next to scripts/).
+        env = {k: v for k, v in os.environ.items() if k != "RIVIEW_HOME"}
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, 'scripts'); "
+             "import riview; print(riview.riview_home())"],
+            cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=True,
+        )
+        expected = (REPO_ROOT / ".riview").resolve()
+        self.assertEqual(Path(r.stdout.strip()).resolve(), expected)
+
+    def test_env_override_wins(self):
+        env = {**os.environ, "RIVIEW_HOME": "/tmp/riview-some-override"}
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, 'scripts'); "
+             "import riview; print(riview.riview_home())"],
+            cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(r.stdout.strip(), "/tmp/riview-some-override")
+
+
 class RiviewDaemonHostGateTests(unittest.TestCase):
     """Daemon-startup tests that don't share the long-lived fixture above."""
 

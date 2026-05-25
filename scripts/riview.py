@@ -67,8 +67,14 @@ def validate_session_id(sid: str) -> None:
 
 
 def riview_home() -> Path:
+    # Storage root precedence: $RIVIEW_HOME, else repo-local `<riview_repo>/.riview/`.
+    # The default lives next to the daemon source so one RIView checkout backs
+    # all consuming-project agents that submit to it. Existing `~/.riview/`
+    # deployments keep working by exporting `RIVIEW_HOME=~/.riview`.
     override = os.environ.get("RIVIEW_HOME")
-    return Path(override) if override else Path.home() / ".riview"
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent.parent / ".riview"
 
 
 def sessions_root() -> Path:
@@ -857,6 +863,7 @@ def _render_session_html(
         return HTTPStatus.CONFLICT, _render_invalid_session_html(sid, errors)
     md_text = md_bytes.decode("utf-8")
     bodies = render.parse_anchored_bodies(md_text)
+    overlay_comments = _apply_overlay_to_spec(sid, cur, spec, bodies)
     return HTTPStatus.OK, render.build_html(
         spec,
         bodies,
@@ -864,7 +871,62 @@ def _render_session_html(
         submit_token=submit_token,
         session_id=sid,
         base_revision=cur,
+        overlay_comments=overlay_comments,
     )
+
+
+def _apply_overlay_to_spec(
+    sid: str, cur: int, spec: dict, bodies: dict[str, str]
+) -> dict[str, str]:
+    """Merge the current revision's submitted review (the website's overlay)
+    into the in-memory spec + bodies before render.
+
+    Status, resolution, and body_edit fields land on the node / bodies dicts
+    directly so the renderer's existing prefill picks them up. Comments are
+    returned separately so they prefill the textarea baseline without leaking
+    into `node.review.comment` — see ADR-0011 for why canonical prior-cycle
+    comments must not invite stale resubmission.
+    """
+    overlay_path = session_dir(sid) / "reviews" / str(cur) / "review.json"
+    if not overlay_path.exists():
+        return {}
+    try:
+        doc = json.loads(overlay_path.read_text("utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    entries = doc.get("reviews") if isinstance(doc, dict) else None
+    if not isinstance(entries, list):
+        return {}
+    nodes = spec.get("nodes") if isinstance(spec, dict) else None
+    if not isinstance(nodes, list):
+        return {}
+    node_by_id = {n["id"]: n for n in nodes if isinstance(n, dict) and "id" in n}
+
+    overlay_comments: dict[str, str] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        nid = entry.get("node_id")
+        if not isinstance(nid, str):
+            continue
+        node = node_by_id.get(nid)
+        if node is None:
+            continue
+        new_status = entry.get("new_status")
+        if isinstance(new_status, str) and new_status:
+            node["status"] = new_status
+        resolution = entry.get("resolution")
+        if node.get("kind") == "ambiguity" and isinstance(resolution, dict):
+            node["resolution"] = resolution
+        body_edit = entry.get("body_edit")
+        if isinstance(body_edit, str):
+            anchor = node.get("source_anchor", nid)
+            if isinstance(anchor, str):
+                bodies[anchor] = body_edit
+        comment = entry.get("comment")
+        if isinstance(comment, str):
+            overlay_comments[nid] = comment
+    return overlay_comments
 
 
 def _render_invalid_session_html(sid: str, errors: list[str]) -> str:
