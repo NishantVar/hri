@@ -436,11 +436,78 @@ def _merge_reviews_by_node_id(
     return sorted(by_id.values(), key=lambda e: e["node_id"])
 
 
-def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
+# Fields included in a node's stale-check fingerprint, by kind. The reviewer
+# saw these (title/status/body/etc.) when forming their opinion; if any change
+# between base and current, the per-entry submit is reported as a conflict so
+# the reviewer can decide whether to re-review.
+_FINGERPRINT_BASE_FIELDS = ("kind", "title", "status", "source_anchor", "depends_on")
+_FINGERPRINT_KIND_FIELDS = {
+    "decision": ("rationale", "alternatives"),
+    "ambiguity": ("prompt", "options", "resolution"),
+    "risk": ("severity", "mitigation"),
+}
+
+
+def _node_fingerprint(node: dict, body_md: str) -> str:
+    """Deterministic fingerprint over the user-visible parts of a node.
+
+    Excludes `review` (prior-pass metadata) and `confidence` (AI-internal).
+    Excluding them keeps a pure-status confirm cycle from invalidating later
+    reviews on adjacent nodes.
+    """
+    payload: dict = {"body_md": body_md}
+    for f in _FINGERPRINT_BASE_FIELDS:
+        payload[f] = node.get(f)
+    for f in _FINGERPRINT_KIND_FIELDS.get(node.get("kind", ""), ()):
+        payload[f] = node.get(f)
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _load_rev_spec(sid: str, rev: int) -> tuple[dict, str]:
+    """Return (sidecar, md_text) for a session revision. Raises FileNotFoundError."""
+    rev_dir = session_dir(sid) / "revisions" / str(rev)
+    sidecar = json.loads((rev_dir / "decisions.json").read_text("utf-8"))
+    md_text = (rev_dir / "source.md").read_text("utf-8")
+    return sidecar, md_text
+
+
+def _fingerprint_index(sidecar: dict, md_text: str) -> dict[str, str]:
+    """Map node_id -> fingerprint for every node in a revision."""
+    bodies = render.parse_anchored_bodies(md_text)
+    out: dict[str, str] = {}
+    for n in sidecar.get("nodes") or []:
+        if not isinstance(n, dict):
+            continue
+        nid = n.get("id")
+        if not isinstance(nid, str):
+            continue
+        out[nid] = _node_fingerprint(n, bodies.get(n.get("source_anchor", nid), ""))
+    return out
+
+
+def record_review_for_session(
+    sid: str,
+    review_bytes: bytes,
+    *,
+    require_base_revision: bool = False,
+) -> dict:
     """Validate + persist a review for a session's current revision.
 
     Shared by `submit-review` CLI and the HTTP POST endpoint. Holds the
     per-session write lock around the meta update.
+
+    Two staleness modes:
+    - If the body contains `base_revision` (browser POSTs after slice 1):
+      per-node optimistic concurrency. For each entry, the daemon fingerprints
+      the node at base_revision and at current_revision; equal => accept, differ
+      (or new-since-base) => conflict. Only accepted entries are persisted, and
+      they are rewritten to the current `spec_version` so the on-disk review
+      file is always coherent with the current revision.
+    - If the body has no `base_revision` (legacy CLI path): the `spec_version`
+      must match the current revision's version exactly, and all entries are
+      accepted. `require_base_revision=True` (set by the HTTP handler) rejects
+      this path with 400 — only the CLI may submit without `base_revision`.
 
     On repeated POSTs against the same revision, `reviews[]` is merged by
     `node_id` (upsert: later entries win) so per-card and batch submits can
@@ -470,6 +537,23 @@ def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
                 http_status=400,
             )
 
+    base_revision_raw = review.get("base_revision")
+    has_base = "base_revision" in review and base_revision_raw is not None
+    if not has_base and require_base_revision:
+        raise ReviewError(
+            "POST body must include integer 'base_revision' "
+            "(the session revision the page rendered against)",
+            http_status=400,
+        )
+    base_revision: int | None = None
+    if has_base:
+        if isinstance(base_revision_raw, bool) or not isinstance(base_revision_raw, int):
+            raise ReviewError(
+                f"base_revision must be an integer, got {type(base_revision_raw).__name__}",
+                http_status=400,
+            )
+        base_revision = base_revision_raw
+
     with session_write_lock(sid):
         meta = load_meta(sid)  # raises SessionNotFound, handled at call sites
         cur = meta["current_revision"]
@@ -481,17 +565,26 @@ def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
                 f"session spec_id {meta.get('spec_id')!r}",
                 http_status=409,
             )
-        cur_decisions_path = (
-            session_dir(sid) / "revisions" / str(cur) / "decisions.json"
-        )
-        cur_sidecar = json.loads(cur_decisions_path.read_text("utf-8"))
-        if review.get("spec_version") != cur_sidecar.get("version"):
-            raise ReviewError(
-                f"review spec_version {review.get('spec_version')!r} does not "
-                f"match session current revision (rev {cur}) version "
-                f"{cur_sidecar.get('version')!r}",
-                http_status=409,
-            )
+
+        cur_sidecar, cur_md = _load_rev_spec(sid, cur)
+
+        if has_base:
+            # base_revision must refer to a known revision in this session.
+            if str(base_revision) not in (meta.get("revisions") or {}):
+                raise ReviewError(
+                    f"unknown base_revision {base_revision!r} for session {sid} "
+                    f"(known: {sorted(int(r) for r in (meta.get('revisions') or {}))})",
+                    http_status=400,
+                )
+        else:
+            # Legacy CLI path: require spec_version == current.
+            if review.get("spec_version") != cur_sidecar.get("version"):
+                raise ReviewError(
+                    f"review spec_version {review.get('spec_version')!r} does not "
+                    f"match session current revision (rev {cur}) version "
+                    f"{cur_sidecar.get('version')!r}",
+                    http_status=409,
+                )
 
         # Reject unknown node_ids up-front (would fail apply.py later anyway).
         known_node_ids = {
@@ -514,6 +607,34 @@ def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
             entry for entry in incoming_reviews if not apply_mod.is_empty_entry(entry)
         ]
 
+        # Per-node staleness split. CLI path (no base_revision) accepts everything.
+        accepted_entries: list[dict] = []
+        conflict_records: list[dict] = []
+        if has_base and base_revision is not None and base_revision != cur:
+            base_sidecar, base_md = _load_rev_spec(sid, base_revision)
+            base_fp = _fingerprint_index(base_sidecar, base_md)
+            cur_fp = _fingerprint_index(cur_sidecar, cur_md)
+            for entry in filtered_incoming:
+                nid = entry["node_id"]
+                if nid not in base_fp:
+                    conflict_records.append({
+                        "node_id": nid,
+                        "reason": "node did not exist at base_revision",
+                        "base_revision": base_revision,
+                        "current_revision": cur,
+                    })
+                elif base_fp[nid] != cur_fp.get(nid):
+                    conflict_records.append({
+                        "node_id": nid,
+                        "reason": "node changed between base_revision and current_revision",
+                        "base_revision": base_revision,
+                        "current_revision": cur,
+                    })
+                else:
+                    accepted_entries.append(entry)
+        else:
+            accepted_entries = list(filtered_incoming)
+
         rev_dir = session_dir(sid) / "reviews" / str(cur)
         rev_dir.mkdir(parents=True, exist_ok=True)
         review_path = rev_dir / "review.json"
@@ -530,26 +651,37 @@ def record_review_for_session(sid: str, review_bytes: bytes) -> dict:
                 # Corrupted prior file shouldn't block a clean overwrite.
                 existing_reviews = []
 
-        merged = dict(review)
-        merged["reviews"] = _merge_reviews_by_node_id(
-            existing_reviews, filtered_incoming
+        # Persisted review file is always coherent with the current revision:
+        # spec_version is normalized to current, and base_revision is stripped
+        # (it described the in-flight POST, not the stored review).
+        persisted_top = dict(review)
+        persisted_top.pop("base_revision", None)
+        persisted_top["spec_version"] = cur_sidecar.get("version")
+        persisted_top["reviews"] = _merge_reviews_by_node_id(
+            existing_reviews, accepted_entries
         )
-        merged_bytes = (json.dumps(merged, indent=2, sort_keys=True) + "\n").encode(
-            "utf-8"
-        )
-        atomic_write_bytes(review_path, merged_bytes)
+        persisted_bytes = (
+            json.dumps(persisted_top, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        atomic_write_bytes(review_path, persisted_bytes)
         atomic_write_text(rev_dir / "submitted_at", now_iso() + "\n")
         meta["status"] = "review_submitted"
         meta["event_seq"] = int(meta.get("event_seq", 0)) + 1
         save_meta(sid, meta)
         _notify_session(sid)
-        return {
+        payload: dict = {
             "session_id": sid,
             "revision": cur,
+            "current_revision": cur,
             "status": "review_submitted",
             "event_seq": meta["event_seq"],
-            "review_count": len(merged["reviews"]),
+            "review_count": len(persisted_top["reviews"]),
         }
+        if has_base:
+            payload["base_revision"] = base_revision
+            payload["accepted"] = [{"node_id": e["node_id"]} for e in accepted_entries]
+            payload["conflicts"] = conflict_records
+        return payload
 
 
 def cmd_submit_review(args) -> int:
@@ -730,6 +862,8 @@ def _render_session_html(
         bodies,
         submit_url=f"/sessions/{sid}/review",
         submit_token=submit_token,
+        session_id=sid,
+        base_revision=cur,
     )
 
 
@@ -935,7 +1069,9 @@ class RIViewHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            payload = record_review_for_session(sid, body)
+            payload = record_review_for_session(
+                sid, body, require_base_revision=True
+            )
         except ReviewError as e:
             self._text(e.http_status, e.message)
             return

@@ -222,6 +222,8 @@ def build_html(
     *,
     submit_url: str = "",
     submit_token: str = "",
+    session_id: str | None = None,
+    base_revision: int | None = None,
 ) -> str:
     ordered = topo_order(spec["nodes"])
     affects = compute_affects(spec["nodes"])
@@ -248,7 +250,12 @@ def build_html(
 
     title = html.escape(spec["spec_title"])
     spec_id = html.escape(spec["spec_id"])
-    submit_payload = json.dumps({"url": submit_url, "token": submit_token})
+    submit_payload = json.dumps({
+        "url": submit_url,
+        "token": submit_token,
+        "session_id": session_id,
+        "base_revision": base_revision,
+    })
     submit_payload = submit_payload.replace("</", "<\\/")
     return TEMPLATE.replace("__TITLE__", title) \
         .replace("__SPEC_ID__", spec_id) \
@@ -830,20 +837,25 @@ __SUBMIT__
 (function() {
   const SPEC = JSON.parse(document.getElementById("spec-payload").textContent);
 
+  // Status dropdown options. Every status from the node's enum is selectable
+  // so the form can pre-fill to the current applied status (slice 2). The
+  // initial statuses (ai-confident, open) are included for that purpose;
+  // selecting them as a "new_status" is technically a downgrade but the
+  // touched-vs-applied diff treats unchanged status as no-op.
   const STATUS_OPTIONS = {
     decision: [
-      { value: "", label: "— No change —" },
+      { value: "ai-confident", label: "AI-confident" },
       { value: "confirmed", label: "Confirm" },
       { value: "rejected", label: "Reject" },
       { value: "needs-work", label: "Needs work" }
     ],
     ambiguity: [
-      { value: "", label: "— No change —" },
+      { value: "open", label: "Open" },
       { value: "resolved", label: "Resolved" },
       { value: "deferred", label: "Defer" }
     ],
     risk: [
-      { value: "", label: "— No change —" },
+      { value: "open", label: "Open" },
       { value: "accepted", label: "Accept" },
       { value: "mitigated", label: "Mitigated" },
       { value: "dismissed", label: "Dismiss" }
@@ -860,14 +872,33 @@ __SUBMIT__
       .replace(/'/g, "&#39;");
   }
 
-  // Per-node review state
+  // Slice 2: applied-state lookup. Touched/diff logic compares form state
+  // against APPLIED_BY_ID, not against empty — otherwise pre-filled cards
+  // look touched and Submit-all would re-POST the entire spec.
+  const APPLIED_BY_ID = {};
+  SPEC.nodes.forEach(n => {
+    APPLIED_BY_ID[n.id] = {
+      status: n.status,
+      resolution: (n.kind === "ambiguity" && n.resolution && typeof n.resolution === "object")
+        ? { choice_id: n.resolution.choice_id || null,
+            freeform: n.resolution.freeform || null }
+        : null
+    };
+  });
+
+  // Per-node review state. Pre-filled from APPLIED_BY_ID so the form shows
+  // what is currently true and the reviewer edits from there.
   const state = {};
   SPEC.nodes.forEach(n => {
+    const applied = APPLIED_BY_ID[n.id];
     state[n.id] = {
-      new_status: "",
+      new_status: applied.status,
       comment: "",
       body_edit: null,
-      resolution: null // { choice_id?, freeform? }
+      resolution: applied.resolution
+        ? { choice_id: applied.resolution.choice_id,
+            freeform: applied.resolution.freeform }
+        : null
     };
   });
 
@@ -908,36 +939,59 @@ __SUBMIT__
     return pending;
   }
 
-  function isTouchedState(s) {
-    return Boolean(s.new_status) || Boolean(s.comment.trim()) || s.resolution !== null;
+  function resolutionsEqual(a, b) {
+    if (a === b) return true;
+    if (!a && !b) return true;
+    const aChoice = (a && a.choice_id) || null;
+    const bChoice = (b && b.choice_id) || null;
+    if (aChoice !== bChoice) return false;
+    const aFree = (a && typeof a.freeform === "string") ? a.freeform.trim() : "";
+    const bFree = (b && typeof b.freeform === "string") ? b.freeform.trim() : "";
+    return aFree === bFree;
   }
 
-  // A "pure approval" is a status flip to {confirmed,accepted,mitigated} with
-  // no other content (no comment, no resolution, no body edit). Approval adds
-  // no new semantic information — it just endorses what's already there — so
-  // it must NOT mark downstream as upstream-stale. `resolved` deliberately is
-  // NOT here: resolving an ambiguity records a choice/freeform answer, which
-  // is real new content downstream may want to react to.
-  function isPureApproval(s) {
+  // Slice 2: touched = state differs from APPLIED_BY_ID for that node.
+  // Empty resolution state matches null applied resolution. Comment is
+  // per-cycle (never persistent) so any non-empty comment counts as touched.
+  function isTouchedNode(nid) {
+    const s = state[nid];
+    const applied = APPLIED_BY_ID[nid];
+    if (!s || !applied) return false;
+    if (s.new_status !== applied.status) return true;
+    if (s.comment && s.comment.trim().length > 0) return true;
+    if (s.body_edit) return true;
+    if (!resolutionsEqual(s.resolution, applied.resolution)) return true;
+    return false;
+  }
+
+  // A "pure approval" is a status FLIP to {confirmed,accepted,mitigated} with
+  // no other content (no comment, no resolution change, no body edit). Adds
+  // no new semantic information — just endorses what's already there — so it
+  // must NOT mark downstream as upstream-stale. With slice 2 prefill the
+  // status flip is detected against APPLIED_BY_ID, not against empty.
+  // `resolved` deliberately is NOT here: resolving an ambiguity records a
+  // choice/freeform answer, which is real new content downstream may want
+  // to react to.
+  function isPureApprovalNode(nid) {
+    const s = state[nid];
+    const applied = APPLIED_BY_ID[nid];
+    if (!s || !applied) return false;
+    if (s.new_status === applied.status) return false; // not a flip
     if (s.new_status !== "confirmed" && s.new_status !== "accepted" && s.new_status !== "mitigated") return false;
     if (s.comment && s.comment.trim().length > 0) return false;
-    if (s.resolution !== null) return false;
+    if (!resolutionsEqual(s.resolution, applied.resolution)) return false;
     if (s.body_edit) return false;
     return true;
   }
 
-  // "Material change" = touched AND not a pure approval. Used only by the
-  // upstream-changed badge — other call sites (touched class, submit button
-  // enable, footer counter) legitimately want any-touch and keep using
-  // isTouchedState directly.
-  function isMaterialChange(s) {
-    return isTouchedState(s) && !isPureApproval(s);
+  function isMaterialChangeNode(nid) {
+    return isTouchedNode(nid) && !isPureApprovalNode(nid);
   }
 
   function recomputeStaleness() {
     SPEC.nodes.forEach(n => {
       const deps = Array.isArray(n.depends_on) ? n.depends_on : [];
-      const upstreamMaterial = deps.some(d => state[d] && isMaterialChange(state[d]));
+      const upstreamMaterial = deps.some(d => state[d] && isMaterialChangeNode(d));
       const el = document.getElementById("card-" + n.id);
       if (el) el.classList.toggle("upstream-stale", upstreamMaterial);
     });
@@ -1140,9 +1194,14 @@ __SUBMIT__
     const cardSubmitBtn = review.querySelector('[data-role="card-submit"]');
     const cardStatusEl = review.querySelector('[data-role="card-status"]');
 
+    // Slice 2+3: pre-fill form from state[node.id]. state was seeded with
+    // APPLIED_BY_ID at init and may have been overridden by rehydrated draft
+    // values (slice 3). Touched-vs-applied detection means prefilled values
+    // that still match applied do NOT mark the card as touched.
+    resyncCardDom(node.id);
+
     function updateTouched() {
-      const s = state[node.id];
-      const touched = isTouchedState(s);
+      const touched = isTouchedNode(node.id);
       card.classList.toggle("touched", touched);
       if (cardSubmitBtn) cardSubmitBtn.disabled = !touched;
       // Clear stale "ok" status messages once the user starts editing again.
@@ -1152,6 +1211,8 @@ __SUBMIT__
       }
       recomputeFooter();
       recomputeStaleness();
+      // Slice 3: persist draft on every state mutation.
+      saveDraft();
     }
 
     if (cardSubmitBtn) {
@@ -1170,8 +1231,23 @@ __SUBMIT__
         cardStatusEl.classList.remove("error", "ok");
         try {
           const data = await postReviews([entry]);
-          cardStatusEl.textContent = "Submitted (rev " + (data.revision || "?") + ", " + (data.review_count || 1) + " on server)";
-          cardStatusEl.classList.add("ok");
+          const conflict = (data.conflicts || []).find(c => c.node_id === entry.node_id);
+          if (conflict) {
+            const reason = conflict.reason || "node changed since this page loaded";
+            cardStatusEl.textContent = "Conflict (rev " + (data.current_revision || "?") + "): " + reason + ". Reload to see the new version.";
+            cardStatusEl.classList.add("error");
+            cardSubmitBtn.disabled = false;
+          } else {
+            cardStatusEl.textContent = "Submitted (rev " + (data.current_revision || data.revision || "?") + ", " + (data.review_count || 1) + " on server)";
+            cardStatusEl.classList.add("ok");
+            // Slice 3: clear the just-submitted entry from state + storage so
+            // a reload doesn't re-show it as an unsubmitted draft.
+            resetNodeStateToApplied(node.id);
+            resyncCardDom(node.id);
+            saveDraft();
+            recomputeFooter();
+            recomputeStaleness();
+          }
         } catch (err) {
           cardStatusEl.textContent = "Failed: " + (err && err.message ? err.message : err);
           cardStatusEl.classList.add("error");
@@ -1203,14 +1279,18 @@ __SUBMIT__
       updateTouched();
     });
     function maybeAutoResolve() {
-      // Only auto-flip status to "resolved" when the user hasn't manually set a status
-      // AND we have a resolution that would actually be valid at export time.
+      // Auto-flip status to "resolved" when (a) the user just picked a valid
+      // resolution AND (b) status select still shows the applied status — i.e.,
+      // the reviewer hasn't manually chosen a different status. Slice 2 pre-fills
+      // status to the applied value, so the original "is empty" gate would never
+      // fire; matching against APPLIED_BY_ID preserves the intent.
       const r = state[node.id].resolution;
       const valid = r && (
         (r.choice_id) ||
         (typeof r.freeform === "string" && r.freeform.trim().length > 0)
       );
-      if (valid && !state[node.id].new_status) {
+      const appliedStatus = (APPLIED_BY_ID[node.id] || {}).status || "";
+      if (valid && statusSel.value === appliedStatus && appliedStatus !== "resolved") {
         statusSel.value = "resolved";
         state[node.id].new_status = "resolved";
       }
@@ -1258,7 +1338,7 @@ __SUBMIT__
   }
 
   function recomputeFooter() {
-    const touched = Object.values(state).filter(isTouchedState).length;
+    const touched = Object.keys(state).filter(isTouchedNode).length;
     document.getElementById("touched-count").textContent = touched;
     document.getElementById("export-btn").disabled = touched === 0;
     const submitAllBtn = document.getElementById("submit-all-btn");
@@ -1309,23 +1389,33 @@ __SUBMIT__
 
   function buildEntryForNode(n) {
     const s = state[n.id];
-    const hasStatus = Boolean(s.new_status);
-    const hasComment = Boolean(s.comment.trim());
-    const hasResolution = s.resolution !== null && (
-      (s.resolution.choice_id) ||
-      (s.resolution.freeform && s.resolution.freeform.trim())
-    );
-    if (!hasStatus && !hasComment && !hasResolution) return null;
-    if (n.kind === "ambiguity" && s.new_status === "resolved" && !hasResolution) return "invalid";
+    const applied = APPLIED_BY_ID[n.id] || { status: "", resolution: null };
+    const statusDiff = s.new_status !== applied.status;
+    const hasComment = Boolean(s.comment && s.comment.trim());
+    const resolutionDiff = !resolutionsEqual(s.resolution, applied.resolution);
+    // Slice 2: no-diff entries are dropped client-side before POST. The
+    // responder's deci-noop-on-pure-status-confirm covers any residual case
+    // where a non-trivial entry still resolves to pure approval at apply time.
+    if (!statusDiff && !hasComment && !resolutionDiff) return null;
+    // Validity check: if the effective status (post-change) is "resolved" for
+    // an ambiguity, a valid resolution must be present in state.
+    const effectiveStatus = statusDiff ? s.new_status : applied.status;
+    if (n.kind === "ambiguity" && effectiveStatus === "resolved") {
+      const hasValidResolution = s.resolution && (
+        (s.resolution.choice_id) ||
+        (s.resolution.freeform && s.resolution.freeform.trim())
+      );
+      if (!hasValidResolution) return "invalid";
+    }
     const entry = { node_id: n.id };
-    if (hasStatus) entry.new_status = s.new_status;
-    if (hasResolution) {
+    if (statusDiff) entry.new_status = s.new_status;
+    if (resolutionDiff && s.resolution) {
       const r = {};
       if (s.resolution.choice_id) r.choice_id = s.resolution.choice_id;
       if (s.resolution.freeform && s.resolution.freeform.trim()) {
         r.freeform = s.resolution.freeform.trim();
       }
-      entry.resolution = r;
+      if (Object.keys(r).length > 0) entry.resolution = r;
     }
     if (hasComment) entry.comment = s.comment.trim();
     return entry;
@@ -1354,13 +1444,17 @@ __SUBMIT__
 
   async function postReviews(reviewEntries) {
     if (!SUBMIT.url) throw new Error("no submit URL configured");
-    const body = JSON.stringify({
+    const payload = {
       spec_id: SPEC.spec_id,
       spec_version: SPEC.version,
       reviewed_at: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
       reviewer: null,
       reviews: reviewEntries
-    });
+    };
+    if (SUBMIT.base_revision != null) {
+      payload.base_revision = SUBMIT.base_revision;
+    }
+    const body = JSON.stringify(payload);
     const res = await fetch(SUBMIT.url, {
       method: "POST",
       headers: {
@@ -1376,9 +1470,160 @@ __SUBMIT__
     return res.json().catch(() => ({}));
   }
 
-  let SUBMIT = { url: "", token: "" };
+  let SUBMIT = { url: "", token: "", session_id: null, base_revision: null };
+
+  // Slice 3: localStorage draft persistence. Key shape mirrors the design's
+  // deci-persist-form-state contract: session-scoped on daemon pages,
+  // standalone-scoped when no session (e.g. render.py invoked on a file).
+  // Only entries that DIFFER from APPLIED_BY_ID are persisted, so the blob
+  // stays small and a "blank" page never writes to storage.
+  const DRAFT_RETAIN_REVS = 5;
+  function draftKeyPrefix() {
+    if (SUBMIT && SUBMIT.session_id) {
+      return "riview:draft:" + SUBMIT.session_id + ":";
+    }
+    return "riview:draft:standalone:" + SPEC.spec_id + ":";
+  }
+  function draftKeyRev() {
+    if (SUBMIT && SUBMIT.session_id && SUBMIT.base_revision != null) {
+      return SUBMIT.base_revision;
+    }
+    return SPEC.version;
+  }
+  function draftKey() {
+    return draftKeyPrefix() + draftKeyRev();
+  }
+  function loadDraft() {
+    try {
+      const raw = localStorage.getItem(draftKey());
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return (parsed && typeof parsed === "object") ? parsed : null;
+    } catch (e) { return null; }
+  }
+  function saveDraft() {
+    try {
+      const sparse = {};
+      Object.keys(state).forEach(nid => {
+        if (isTouchedNode(nid)) sparse[nid] = state[nid];
+      });
+      if (Object.keys(sparse).length === 0) {
+        localStorage.removeItem(draftKey());
+      } else {
+        localStorage.setItem(draftKey(), JSON.stringify(sparse));
+      }
+    } catch (e) { /* quota / disabled — best-effort persistence */ }
+  }
+  function pruneOldDrafts() {
+    try {
+      const prefix = draftKeyPrefix();
+      const cur = draftKeyRev();
+      if (cur == null) return;
+      const stale = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(prefix)) {
+          const tail = k.slice(prefix.length);
+          const n = parseInt(tail, 10);
+          if (Number.isFinite(n) && n < (cur - DRAFT_RETAIN_REVS + 1)) {
+            stale.push(k);
+          }
+        }
+      }
+      stale.forEach(k => localStorage.removeItem(k));
+    } catch (e) { /* localStorage unavailable */ }
+  }
+  function rehydrateFromDraft() {
+    const draft = loadDraft();
+    if (!draft) return;
+    Object.keys(draft).forEach(nid => {
+      if (!state[nid]) return;
+      const persisted = draft[nid];
+      if (!persisted || typeof persisted !== "object") return;
+      if (typeof persisted.new_status === "string") {
+        state[nid].new_status = persisted.new_status;
+      }
+      if (typeof persisted.comment === "string") {
+        state[nid].comment = persisted.comment;
+      }
+      if (persisted.body_edit !== undefined) {
+        state[nid].body_edit = persisted.body_edit;
+      }
+      if (persisted.resolution === null) {
+        state[nid].resolution = null;
+      } else if (persisted.resolution && typeof persisted.resolution === "object") {
+        state[nid].resolution = {
+          choice_id: persisted.resolution.choice_id || null,
+          freeform: persisted.resolution.freeform || null,
+        };
+      }
+    });
+  }
+  function resetNodeStateToApplied(nid) {
+    const applied = APPLIED_BY_ID[nid];
+    if (!applied || !state[nid]) return;
+    state[nid].new_status = applied.status;
+    state[nid].comment = "";
+    state[nid].body_edit = null;
+    state[nid].resolution = applied.resolution
+      ? { choice_id: applied.resolution.choice_id,
+          freeform: applied.resolution.freeform }
+      : null;
+  }
+  function resyncCardDom(nid) {
+    const card = document.getElementById("card-" + nid);
+    if (!card) return;
+    const review = card.querySelector(".review");
+    if (!review) return;
+    const statusSel = review.querySelector('[data-role="status"]');
+    const commentTa = review.querySelector('[data-role="comment"]');
+    const radios = review.querySelectorAll('input[type="radio"]');
+    const freeformTa = review.querySelector('[data-role="freeform"]');
+    const cur = state[nid];
+    if (!cur) return;
+    if (statusSel) {
+      const matchOpt = Array.from(statusSel.options).find(o => o.value === cur.new_status);
+      if (matchOpt) statusSel.value = cur.new_status;
+    }
+    if (commentTa) commentTa.value = cur.comment || "";
+    radios.forEach(r => { r.checked = false; });
+    review.querySelectorAll(".options li").forEach(x => x.classList.remove("selected"));
+    if (freeformTa) {
+      freeformTa.style.display = "none";
+      freeformTa.required = false;
+      freeformTa.setAttribute("aria-invalid", "false");
+      freeformTa.value = "";
+    }
+    if (cur.resolution) {
+      if (cur.resolution.choice_id) {
+        const radio = Array.from(radios).find(r => r.value === cur.resolution.choice_id);
+        if (radio) {
+          radio.checked = true;
+          const li = radio.closest("li");
+          if (li) li.classList.add("selected");
+        }
+      } else if (cur.resolution.freeform && freeformTa) {
+        const ff = Array.from(radios).find(r => r.value === "__freeform__");
+        if (ff) {
+          ff.checked = true;
+          const li = ff.closest("li");
+          if (li) li.classList.add("selected");
+        }
+        freeformTa.style.display = "block";
+        freeformTa.value = cur.resolution.freeform;
+      }
+    }
+    card.classList.toggle("touched", isTouchedNode(nid));
+  }
 
   function init() {
+    // Read SUBMIT before rendering cards so localStorage rehydration runs
+    // against the correct draft key (session_id/base_revision come from here).
+    try {
+      SUBMIT = JSON.parse(document.getElementById("submit-config").textContent);
+    } catch (e) { /* keep default */ }
+    pruneOldDrafts();
+    rehydrateFromDraft();
     renderCounts();
     const container = document.getElementById("nodes");
     SPEC.nodes.forEach(n => container.appendChild(renderCard(n)));
@@ -1420,7 +1665,6 @@ __SUBMIT__
       URL.revokeObjectURL(a.href);
     });
 
-    SUBMIT = JSON.parse(document.getElementById("submit-config").textContent);
     const submitBtn = document.getElementById("submit-server-btn");
     const submitAllBtn = document.getElementById("submit-all-btn");
     if (SUBMIT.url) {
@@ -1435,7 +1679,12 @@ __SUBMIT__
         copied.textContent = "Submitting...";
         try {
           const data = await postReviews(JSON.parse(output.value).reviews);
-          copied.textContent = "Submitted (rev " + (data.revision || "?") + ", status " + (data.status || "?") + ")";
+          const conflicts = data.conflicts || [];
+          let msg = "Submitted (rev " + (data.current_revision || data.revision || "?") + ", status " + (data.status || "?") + ")";
+          if (conflicts.length) {
+            msg += "; " + conflicts.length + " conflict(s): " + conflicts.map(c => c.node_id).join(", ");
+          }
+          copied.textContent = msg;
         } catch (err) {
           copied.textContent = "Submit error: " + (err && err.message ? err.message : err);
         } finally {
@@ -1449,7 +1698,39 @@ __SUBMIT__
         submitAllBtn.disabled = true;
         try {
           const data = await postReviews(built.delta.reviews);
-          flashBanner("Submitted " + built.delta.reviews.length + " review(s); server has " + (data.review_count || "?") + " for rev " + (data.revision || "?") + (built.dropped.length ? ". Dropped " + built.dropped.length + " incomplete." : "."));
+          const conflicts = data.conflicts || [];
+          const accepted = (data.accepted || []).length;
+          let msg;
+          if (data.accepted) {
+            msg = "Submitted: " + accepted + " accepted, " + conflicts.length + " conflict(s); server has " + (data.review_count || "?") + " for rev " + (data.current_revision || data.revision || "?");
+          } else {
+            msg = "Submitted " + built.delta.reviews.length + " review(s); server has " + (data.review_count || "?") + " for rev " + (data.current_revision || data.revision || "?");
+          }
+          if (conflicts.length) {
+            msg += " — conflicts: " + conflicts.map(c => c.node_id).join(", ") + ". Reload to see latest.";
+          }
+          if (built.dropped.length) {
+            msg += " Dropped " + built.dropped.length + " incomplete.";
+          }
+          flashBanner(msg, conflicts.length > 0);
+          // Slice 3: reset state + draft for accepted entries; leave conflicts
+          // alone so the reviewer can address them after a reload.
+          const acceptedIds = new Set();
+          if (data.accepted) {
+            (data.accepted || []).forEach(a => acceptedIds.add(a.node_id));
+          } else {
+            // CLI-style response (no per-node accepted list): everything submitted
+            // landed unless the call errored.
+            built.delta.reviews.forEach(r => acceptedIds.add(r.node_id));
+          }
+          acceptedIds.forEach(nid => {
+            resetNodeStateToApplied(nid);
+            resyncCardDom(nid);
+          });
+          saveDraft();
+          recomputeFooter();
+          recomputeStaleness();
+          submitAllBtn.disabled = false;
         } catch (err) {
           flashBanner("Submit-all failed: " + (err && err.message ? err.message : err), true);
           submitAllBtn.disabled = false;
