@@ -595,6 +595,45 @@ TEMPLATE = r"""<!doctype html>
     border-radius: 3px;
     font-size: 12.5px;
   }
+  .body-block { display: flex; flex-direction: column; gap: 6px; }
+  .body-actions { display: flex; }
+  .body-edit-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 3px;
+    padding: 2px 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .body-edit-toggle:hover { color: var(--fg); border-color: var(--border-strong); }
+  .body-edit-toggle[aria-expanded="true"] {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .body-editor textarea {
+    width: 100%;
+    min-height: 120px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+  .body-editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .body-editor-hint { font-size: 12px; color: var(--muted); }
+  .badge.body-edited {
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    background: transparent;
+  }
   .meta-row {
     margin-top: 8px;
     font-size: 13px;
@@ -922,6 +961,15 @@ __CANONICAL_BY_ID__
     APPLIED_BY_ID[n.id] = {
       status: n.status,
       comment: typeof overlayComment === "string" ? overlayComment : "",
+      // Applied body markdown = the overlay's body_edit if one exists,
+      // else canonical. On the daemon path, n._body_md ships the
+      // overlay-merged value, so it already IS the applied body — but
+      // we prefer the explicit overlay field when present to keep this
+      // self-contained and resilient if _body_md is absent (e.g. nodes
+      // with no anchored body still get an empty applied baseline).
+      body_md: (typeof overlay.body_edit === "string")
+        ? overlay.body_edit
+        : (typeof n._body_md === "string" ? n._body_md : ""),
       resolution: (n.kind === "ambiguity" && n.resolution && typeof n.resolution === "object")
         ? { choice_id: n.resolution.choice_id || null,
             freeform: n.resolution.freeform || null }
@@ -1006,6 +1054,14 @@ __CANONICAL_BY_ID__
     if (c && Object.prototype.hasOwnProperty.call(c, "resolution")) return c.resolution;
     return null;
   }
+  function canonicalBody(nid) {
+    const c = CANONICAL_BY_ID[nid];
+    if (c && typeof c.body_md === "string") return c.body_md;
+    // Standalone fallback: SPEC.nodes carry _body_md, which IS canonical
+    // when no overlay merge has run.
+    const n = SPEC.nodes.find(x => x.id === nid);
+    return (n && typeof n._body_md === "string") ? n._body_md : "";
+  }
 
   // Slice 1+2: touched = state differs from APPLIED_BY_ID for that node.
   // Empty resolution state matches null applied resolution. Comment baseline
@@ -1017,7 +1073,12 @@ __CANONICAL_BY_ID__
     if (!s || !applied) return false;
     if (s.new_status !== applied.status) return true;
     if ((s.comment || "").trim() !== (applied.comment || "").trim()) return true;
-    if (s.body_edit) return true;
+    // body_edit: null = user hasn't engaged the editor. Any string (incl. "")
+    // is a real edit. Touched if the edited string differs from the current
+    // applied body (which IS the overlay body when one exists, canonical
+    // otherwise — so retyping canonical with no overlay = not touched, but
+    // typing canonical when an overlay exists = touched (snap-back).
+    if (s.body_edit !== null && s.body_edit !== (applied.body_md || "")) return true;
     if (!resolutionsEqual(s.resolution, applied.resolution)) return true;
     return false;
   }
@@ -1038,7 +1099,9 @@ __CANONICAL_BY_ID__
     if (s.new_status !== "confirmed" && s.new_status !== "accepted" && s.new_status !== "mitigated") return false;
     if (s.comment && s.comment.trim().length > 0) return false;
     if (!resolutionsEqual(s.resolution, applied.resolution)) return false;
-    if (s.body_edit) return false;
+    // Any engaged body editor (even retyping the applied body) disqualifies
+    // the flip from being a "pure approval" — pure approval has no content.
+    if (s.body_edit !== null && s.body_edit !== (applied.body_md || "")) return false;
     return true;
   }
 
@@ -1100,6 +1163,7 @@ __CANONICAL_BY_ID__
     head.innerHTML = `
       <span class="badge kind-${escapeHtml(node.kind)}">${escapeHtml(node.kind)}</span>
       <span class="badge status status-${escapeHtml(node.status)}">${escapeHtml(node.status)}</span>
+      <span class="badge body-edited" data-role="body-edited-chip" hidden title="Body markdown differs from canonical in this revision">body edited</span>
       ${node.kind === "risk" ? `<span class="badge sev-${escapeHtml(node.severity)}">${escapeHtml(node.severity)} severity</span>` : ""}
       <span class="stale-badge" title="An upstream decision has unsubmitted changes — review may need recalibration.">↑ upstream changed</span>
       ${downstreamChipHtml}
@@ -1110,13 +1174,48 @@ __CANONICAL_BY_ID__
     `;
     card.appendChild(head);
 
-    // Body
-    if (node._body_html) {
-      const body = document.createElement("div");
-      body.className = "body";
-      body.innerHTML = node._body_html;
-      card.appendChild(body);
-    }
+    // Body block: always rendered so the body-edit widget has a stable
+    // mount even on nodes with empty canonical bodies. The rendered HTML
+    // section is hidden when the inline editor is open; the editor lives
+    // adjacent so changes feel attached to the prose they edit.
+    const bodyBlock = document.createElement("div");
+    bodyBlock.className = "body-block";
+    bodyBlock.id = "body-block-" + node.id;
+    const bodyHtmlId = "body-html-" + node.id;
+    const bodyEditorId = "body-editor-" + node.id;
+    const bodyHtml = document.createElement("div");
+    bodyHtml.className = "body";
+    bodyHtml.id = bodyHtmlId;
+    bodyHtml.innerHTML = node._body_html || "";
+    bodyBlock.appendChild(bodyHtml);
+
+    const bodyActions = document.createElement("div");
+    bodyActions.className = "body-actions";
+    bodyActions.innerHTML = `
+      <button type="button" class="body-edit-toggle" data-role="body-edit-toggle"
+              aria-expanded="false" aria-controls="${escapeHtml(bodyEditorId)}">
+        Edit body
+      </button>
+    `;
+    bodyBlock.appendChild(bodyActions);
+
+    const bodyEditorWrap = document.createElement("div");
+    bodyEditorWrap.className = "body-editor";
+    bodyEditorWrap.id = bodyEditorId;
+    bodyEditorWrap.hidden = true;
+    bodyEditorWrap.innerHTML = `
+      <textarea data-role="body-edit"
+        aria-label="Body markdown"
+        placeholder="Markdown body for this node..."></textarea>
+      <div class="body-editor-actions">
+        <button type="button" data-role="body-edit-revert" class="secondary">
+          Revert to canonical
+        </button>
+        <span class="body-editor-hint">Save via the card's Submit button.</span>
+      </div>
+    `;
+    bodyBlock.appendChild(bodyEditorWrap);
+    card.appendChild(bodyBlock);
 
     // Per-kind metadata
     if (node.kind === "decision") {
@@ -1251,6 +1350,11 @@ __CANONICAL_BY_ID__
     const freeformTa = review.querySelector('[data-role="freeform"]');
     const cardSubmitBtn = review.querySelector('[data-role="card-submit"]');
     const cardStatusEl = review.querySelector('[data-role="card-status"]');
+    const bodyToggleBtn = card.querySelector('[data-role="body-edit-toggle"]');
+    const bodyEditorEl = card.querySelector(".body-editor");
+    const bodyRenderedEl = card.querySelector(".body");
+    const bodyEditTa = card.querySelector('[data-role="body-edit"]');
+    const bodyRevertBtn = card.querySelector('[data-role="body-edit-revert"]');
 
     // Slice 2+3: pre-fill is handled by the caller (init) AFTER the card is
     // appended to the document — resyncCardDom uses document.getElementById
@@ -1395,6 +1499,45 @@ __CANONICAL_BY_ID__
       });
     }
 
+    if (bodyToggleBtn && bodyEditorEl && bodyEditTa && bodyRenderedEl) {
+      bodyToggleBtn.addEventListener("click", () => {
+        const wasOpen = bodyToggleBtn.getAttribute("aria-expanded") === "true";
+        const open = !wasOpen;
+        bodyToggleBtn.setAttribute("aria-expanded", open ? "true" : "false");
+        bodyToggleBtn.textContent = open ? "Hide body editor" : "Edit body";
+        bodyEditorEl.hidden = !open;
+        bodyRenderedEl.hidden = open;
+        if (open) {
+          // Prefill from current state when the editor is opened: if the
+          // user has typed before, restore that draft; otherwise start
+          // from the applied body (overlay body if one exists, canonical
+          // otherwise — matches the rendered view).
+          const cur = state[node.id];
+          const applied = APPLIED_BY_ID[node.id] || {};
+          bodyEditTa.value = (cur.body_edit !== null)
+            ? cur.body_edit
+            : (applied.body_md || "");
+          bodyEditTa.focus();
+        }
+      });
+      bodyEditTa.addEventListener("input", () => {
+        state[node.id].body_edit = bodyEditTa.value;
+        updateTouched();
+      });
+      if (bodyRevertBtn) {
+        bodyRevertBtn.addEventListener("click", () => {
+          // Set the textarea + state to canonical so submit composes a
+          // snap-back entry (cleared_fields: ["body_edit"]) that evicts
+          // any existing overlay body.
+          const canonical = canonicalBody(node.id);
+          bodyEditTa.value = canonical;
+          state[node.id].body_edit = canonical;
+          updateTouched();
+          bodyEditTa.focus();
+        });
+      }
+    }
+
     return card;
   }
 
@@ -1456,8 +1599,10 @@ __CANONICAL_BY_ID__
     const appliedComment = (applied.comment || "").trim();
     const commentDiff = trimmedComment !== appliedComment;
     const resolutionDiff = !resolutionsEqual(s.resolution, applied.resolution);
+    const appliedBody = applied.body_md || "";
+    const bodyDiff = s.body_edit !== null && s.body_edit !== appliedBody;
     // Touched check — no-op if state matches the merged baseline.
-    if (!statusDiff && !commentDiff && !resolutionDiff && !s.body_edit) return null;
+    if (!statusDiff && !commentDiff && !resolutionDiff && !bodyDiff) return null;
     // Validity: ambiguity with effective status "resolved" needs a resolution.
     if (n.kind === "ambiguity" && s.new_status === "resolved") {
       const hasValidResolution = s.resolution && (
@@ -1492,8 +1637,10 @@ __CANONICAL_BY_ID__
     } else if (existing.resolution && typeof existing.resolution === "object") {
       entry.resolution = existing.resolution;
     }
-    // body_edit: user's value if they edited; else preserve existing.
-    if (s.body_edit) {
+    // body_edit: user's value if they edited (explicit null = untouched);
+    // else preserve existing. Empty string is a real edit (user deleted
+    // the body intentionally) — only skip when truly untouched.
+    if (s.body_edit !== null) {
       entry.body_edit = s.body_edit;
     } else if (typeof existing.body_edit === "string") {
       entry.body_edit = existing.body_edit;
@@ -1521,6 +1668,13 @@ __CANONICAL_BY_ID__
       // a stale prior-overlay resolution.
       clearedFields.push("resolution");
       delete entry.resolution;
+    }
+    if (bodyDiff && s.body_edit === canonicalBody(n.id)) {
+      // User dragged the body back to canonical markdown. Drop body_edit
+      // from the entry and list it so the server's overlay merge evicts
+      // any prior body_edit (or the whole node if nothing else remains).
+      clearedFields.push("body_edit");
+      delete entry.body_edit;
     }
     // Field-merge edge: when `cleared_fields` is present, the server's merge
     // PRESERVES any prior-overlay field the entry doesn't mention. So when
@@ -1776,6 +1930,16 @@ __CANONICAL_BY_ID__
     }
     applied.comment = (newOverlay && typeof newOverlay.comment === "string")
       ? newOverlay.comment : "";
+    // Body: overlay value wins; otherwise snap back to canonical so the
+    // next edit on this page composes against post-submit truth rather
+    // than the page-load body. Without this, a snap-back submit would
+    // leave applied.body_md pointing at the now-evicted overlay body
+    // and the next edit would diff against stale state.
+    if (newOverlay && typeof newOverlay.body_edit === "string") {
+      applied.body_md = newOverlay.body_edit;
+    } else {
+      applied.body_md = canonicalBody(nid);
+    }
   }
   function resyncCardDom(nid) {
     const card = document.getElementById("card-" + nid);
@@ -1820,7 +1984,28 @@ __CANONICAL_BY_ID__
         freeformTa.value = cur.resolution.freeform;
       }
     }
+    // Body editor: when open, prefill from current state (overlay edit) or
+    // the applied baseline. When closed, nothing to sync — the rendered
+    // .body block is server-generated and stays as-is until reload.
+    const bodyEditor = card.querySelector('[data-role="body-edit"]');
+    if (bodyEditor) {
+      const applied = APPLIED_BY_ID[nid] || {};
+      bodyEditor.value = (cur.body_edit !== null) ? cur.body_edit : (applied.body_md || "");
+    }
+    updateEditedChip(card, nid);
     card.classList.toggle("touched", isTouchedNode(nid));
+  }
+
+  // "Body edited" chip: shows when applied body (the user's currently saved
+  // state, including any overlay) differs from canonical. Mirrors how the
+  // status badge surfaces the saved state — the goal is "did this revision
+  // change the body from canonical?", not "is the user currently typing?".
+  function updateEditedChip(card, nid) {
+    const chip = card.querySelector('[data-role="body-edited-chip"]');
+    if (!chip) return;
+    const applied = APPLIED_BY_ID[nid] || {};
+    const edited = (applied.body_md || "") !== canonicalBody(nid);
+    chip.hidden = !edited;
   }
 
   function init() {

@@ -926,7 +926,7 @@ def _render_session_html(
     # (ADR-0011 amendment). Client uses this to detect snap-back-to-canonical
     # and route the diff into cleared_fields. STATUS_BY_ID on the page is the
     # post-merge view, so it cannot serve this role.
-    canonical_by_id = _snapshot_canonical(spec)
+    canonical_by_id = _snapshot_canonical(spec, bodies)
     overlay_entries = _apply_overlay_to_spec(sid, cur, spec, bodies)
     return HTTPStatus.OK, render.build_html(
         spec,
@@ -940,14 +940,16 @@ def _render_session_html(
     )
 
 
-def _snapshot_canonical(spec: dict) -> dict[str, dict]:
-    """Snapshot canonical status + ambiguity resolution per node.
+def _snapshot_canonical(spec: dict, bodies: dict[str, str]) -> dict[str, dict]:
+    """Snapshot canonical status, ambiguity resolution, and body markdown per node.
 
-    Must be called BEFORE _apply_overlay_to_spec mutates the node dicts.
-    Shape: ``{nid: {"status": <str>, "resolution": <dict|null>}}`` — the
-    resolution key is present only for ambiguity nodes (decisions/risks
-    do not carry a resolution field). Used by the daemon-served render
-    path to expose canonical to the client (ADR-0011 amendment).
+    Must be called BEFORE _apply_overlay_to_spec mutates the node dicts and
+    bodies map. Shape: ``{nid: {"status": <str>, "resolution": <dict|null>,
+    "body_md": <str>}}`` — the resolution key is present only for ambiguity
+    nodes. body_md is the pre-overlay anchored body for the node's
+    source_anchor (empty string if none). The client uses this to detect
+    snap-back-to-canonical for status / resolution / body_edit and route
+    the diff into cleared_fields (ADR-0011 amendment).
     """
     out: dict[str, dict] = {}
     nodes = spec.get("nodes") if isinstance(spec, dict) else None
@@ -963,6 +965,8 @@ def _snapshot_canonical(spec: dict) -> dict[str, dict]:
         if node.get("kind") == "ambiguity":
             res = node.get("resolution")
             entry["resolution"] = res if isinstance(res, dict) else None
+        anchor = node.get("source_anchor", nid)
+        entry["body_md"] = bodies.get(anchor, "") if isinstance(anchor, str) else ""
         out[nid] = entry
     return out
 

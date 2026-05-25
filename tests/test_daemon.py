@@ -1047,6 +1047,55 @@ class RiviewDaemonTests(unittest.TestCase):
         overlay = json.loads(body2[s:e])
         self.assertEqual(overlay["amb-streaks"]["new_status"], "resolved")
 
+    def test_canonical_by_id_carries_pre_overlay_body_md(self):
+        # The body-edit UI needs canonical body markdown client-side to
+        # detect snap-back-to-canonical (the user typed the original prose
+        # back, evicting the body_edit overlay via cleared_fields). After
+        # _apply_overlay_to_spec mutates `bodies` in place with the overlay's
+        # body_edit, the renderer's `node._body_md` is the OVERLAID body —
+        # so canonical body markdown must travel via canonical-by-id, which
+        # is snapshotted BEFORE the overlay merge.
+        sid = self._submit_sample()
+        canonical_marker = '<script type="application/json" id="canonical-by-id">'
+
+        # (a) Fresh session, no overlay: canonical body for amb-streaks is
+        # the pre-overlay markdown from the sample spec.
+        body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        s = body.index(canonical_marker) + len(canonical_marker)
+        e = body.index("</script>", s)
+        canon = json.loads(body[s:e])
+        canonical_streaks_body = canon["amb-streaks"]["body_md"]
+        self.assertIn("first-class feature or a stretch goal", canonical_streaks_body)
+        self.assertNotIn("EDITED-BODY-MARK", canonical_streaks_body)
+
+        # (b) POST a body_edit overlay. After reload, canonical-by-id MUST
+        # still carry the pre-overlay body — the daemon page's node._body_md
+        # is post-overlay (apply_overlay_to_spec mutated bodies), so client
+        # snap-back logic depends on canonical-by-id remaining pristine.
+        self._post_review(sid, {
+            "spec_id": "pomodoro-mvp",
+            "spec_version": 1,
+            "reviews": [
+                {"node_id": "amb-streaks",
+                 "body_edit": "EDITED-BODY-MARK reviewer notes here",
+                 "comment": "trying out body edit"},
+            ],
+        })
+        body2 = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")
+        s = body2.index(canonical_marker) + len(canonical_marker)
+        e = body2.index("</script>", s)
+        canon2 = json.loads(body2[s:e])
+        self.assertEqual(canon2["amb-streaks"]["body_md"], canonical_streaks_body,
+                         "canonical-by-id must show pre-overlay body, not overlay body")
+        # Sanity: the overlay-entries island DOES carry the edited body
+        # (separation of concerns).
+        overlay_marker = '<script type="application/json" id="overlay-entries">'
+        s = body2.index(overlay_marker) + len(overlay_marker)
+        e = body2.index("</script>", s)
+        overlay = json.loads(body2[s:e])
+        self.assertEqual(overlay["amb-streaks"]["body_edit"],
+                         "EDITED-BODY-MARK reviewer notes here")
+
     def test_standalone_render_emits_empty_canonical_by_id_island(self):
         # Standalone (non-daemon) render via scripts/render.py main(): no
         # overlay merge ever happens, so canonical-by-id is the empty
