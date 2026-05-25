@@ -951,6 +951,32 @@ __CANONICAL_BY_ID__
       .replace(/'/g, "&#39;");
   }
 
+  // Client port of `md_to_html` in scripts/render.py. Must produce visually
+  // equivalent output for the same tiny markdown subset (paragraphs, bullets,
+  // **bold**, *italic*, `code`) so post-submit body-block refresh matches
+  // server-rendered HTML. Escape first, then apply inline rules to the
+  // already-escaped text (matches Python's order so backticks etc. don't
+  // double-escape).
+  function mdToHtml(text) {
+    if (!text) return "";
+    let escaped = escapeHtml(text);
+    escaped = escaped.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+    escaped = escaped.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+    escaped = escaped.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>");
+    const blocks = escaped.trim().split(/\n\s*\n/);
+    const out = [];
+    for (const block of blocks) {
+      const lines = block.split("\n").filter(ln => ln.trim() !== "");
+      if (lines.length > 0 && lines.every(ln => /^\s*[-*] /.test(ln))) {
+        const items = lines.map(ln => `<li>${ln.replace(/^\s*[-*] /, "").trim()}</li>`).join("");
+        out.push(`<ul>${items}</ul>`);
+      } else {
+        out.push("<p>" + block.replace(/\n/g, "<br>") + "</p>");
+      }
+    }
+    return out.join("");
+  }
+
   // Slice 2: applied-state lookup. Touched/diff logic compares form state
   // against APPLIED_BY_ID, not against empty — otherwise pre-filled cards
   // look touched and Submit-all would re-POST the entire spec.
@@ -1203,9 +1229,10 @@ __CANONICAL_BY_ID__
     bodyEditorWrap.className = "body-editor";
     bodyEditorWrap.id = bodyEditorId;
     bodyEditorWrap.hidden = true;
+    const bodyLabelBase = node.title ? `${node.title} (${node.id})` : node.id;
     bodyEditorWrap.innerHTML = `
       <textarea data-role="body-edit"
-        aria-label="Body markdown"
+        aria-label="${escapeHtml('Body markdown — ' + bodyLabelBase)}"
         placeholder="Markdown body for this node..."></textarea>
       <div class="body-editor-actions">
         <button type="button" data-role="body-edit-revert" class="secondary">
@@ -1637,10 +1664,14 @@ __CANONICAL_BY_ID__
     } else if (existing.resolution && typeof existing.resolution === "object") {
       entry.resolution = existing.resolution;
     }
-    // body_edit: user's value if they edited (explicit null = untouched);
-    // else preserve existing. Empty string is a real edit (user deleted
-    // the body intentionally) — only skip when truly untouched.
-    if (s.body_edit !== null) {
+    // body_edit: only emit when the user's value actually differs from
+    // applied (bodyDiff). state.body_edit may be non-null but equal to
+    // applied — e.g. user opened the editor, typed the same canonical
+    // text, then changed status. Writing the canonical body as an
+    // overlay there would create a no-op body_edit overlay that later
+    // makes apply metadata claim the body was edited. When there's no
+    // real diff, preserve any pre-existing body_edit overlay instead.
+    if (bodyDiff) {
       entry.body_edit = s.body_edit;
     } else if (typeof existing.body_edit === "string") {
       entry.body_edit = existing.body_edit;
@@ -1984,13 +2015,19 @@ __CANONICAL_BY_ID__
         freeformTa.value = cur.resolution.freeform;
       }
     }
-    // Body editor: when open, prefill from current state (overlay edit) or
-    // the applied baseline. When closed, nothing to sync — the rendered
-    // .body block is server-generated and stays as-is until reload.
+    // Body editor: prefill from current state (overlay edit) or the applied
+    // baseline. Body block: re-render from applied.body_md so the rendered
+    // preview matches what's actually saved after a body_edit submit
+    // (without this the user could hide the editor and still see the
+    // pre-submit body, with no visual signal that their edit landed).
     const bodyEditor = card.querySelector('[data-role="body-edit"]');
+    const applied = APPLIED_BY_ID[nid] || {};
     if (bodyEditor) {
-      const applied = APPLIED_BY_ID[nid] || {};
       bodyEditor.value = (cur.body_edit !== null) ? cur.body_edit : (applied.body_md || "");
+    }
+    const bodyHtmlEl = card.querySelector(".body");
+    if (bodyHtmlEl) {
+      bodyHtmlEl.innerHTML = mdToHtml(applied.body_md || "");
     }
     updateEditedChip(card, nid);
     card.classList.toggle("touched", isTouchedNode(nid));
