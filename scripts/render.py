@@ -2030,7 +2030,17 @@ __CANONICAL_BY_ID__
       bodyHtmlEl.innerHTML = mdToHtml(applied.body_md || "");
     }
     updateEditedChip(card, nid);
-    card.classList.toggle("touched", isTouchedNode(nid));
+    // Mirror touched -> submit.disabled here so the initial render path
+    // (rehydrateFromDraft -> renderCard -> resyncCardDom) restores the
+    // submit button's enabled state for cards that loaded with a draft.
+    // Without this, the button stays disabled from its hidden+disabled
+    // HTML markup until the user fires another event that calls
+    // updateTouched(). Keeps hidden (controlled by SUBMIT.url in init())
+    // and disabled (controlled by touched) orthogonal.
+    const touched = isTouchedNode(nid);
+    card.classList.toggle("touched", touched);
+    const cardSubmitBtn = card.querySelector('[data-role="card-submit"]');
+    if (cardSubmitBtn) cardSubmitBtn.disabled = !touched;
   }
 
   // "Body edited" chip: shows when applied body (the user's currently saved
