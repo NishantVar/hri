@@ -1,0 +1,2123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>RIView QA — guided checklist</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: #0e1014;
+    --bg-elev: #161a22;
+    --bg-elev-2: #1f2531;
+    --border: #2a3142;
+    --border-strong: #3a4258;
+    --text: #e6e8ee;
+    --text-dim: #9aa3b3;
+    --text-mute: #6b7385;
+    --accent: #7ab8ff;
+    --accent-dim: #2a4a6a;
+    --pass: #34c075;
+    --pass-bg: #0e2a1d;
+    --fail: #ef5d6f;
+    --fail-bg: #2a1014;
+    --skip: #d4a857;
+    --skip-bg: #2a2010;
+    --pending: #6b7385;
+    --kbd-bg: #1f2531;
+    --code-bg: #0a0c12;
+    --shadow: 0 2px 12px rgba(0,0,0,.4);
+    --radius: 6px;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  :root[data-theme="light"] {
+    --bg: #fbfbfc;
+    --bg-elev: #ffffff;
+    --bg-elev-2: #f3f5f9;
+    --border: #dde2eb;
+    --border-strong: #c2c9d6;
+    --text: #1a1d24;
+    --text-dim: #4f586a;
+    --text-mute: #7a8294;
+    --accent: #0b6fc5;
+    --accent-dim: #cfe1f5;
+    --pass: #117a3e;
+    --pass-bg: #e3f5ea;
+    --fail: #c2384a;
+    --fail-bg: #f8e1e4;
+    --skip: #8a6310;
+    --skip-bg: #f7eed8;
+    --pending: #7a8294;
+    --kbd-bg: #eef1f6;
+    --code-bg: #f3f5f9;
+    --shadow: 0 2px 12px rgba(20,30,50,.08);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 88px; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+  }
+
+  /* progress bar */
+  .progress-rail {
+    position: sticky;
+    top: 0;
+    height: 3px;
+    background: var(--border);
+    z-index: 60;
+  }
+  .progress-fill {
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+    transition: width .25s ease;
+  }
+
+  /* top bar */
+  header.topbar {
+    position: sticky;
+    top: 3px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    z-index: 50;
+    padding: 14px 24px;
+  }
+  .topbar-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .title {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0;
+  }
+  .title .sub {
+    color: var(--text-dim);
+    font-weight: 400;
+    font-size: 13px;
+    margin-left: 8px;
+  }
+  .spacer { flex: 1; }
+
+  .stat-pills {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .pill {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--bg-elev-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+  .pill.pass { color: var(--pass); border-color: var(--pass); background: var(--pass-bg); }
+  .pill.fail { color: var(--fail); border-color: var(--fail); background: var(--fail-bg); }
+  .pill.skip { color: var(--skip); border-color: var(--skip); background: var(--skip-bg); }
+  .pill.pending { color: var(--text-dim); }
+
+  .controls {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  button.ctrl {
+    background: var(--bg-elev);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    font-family: var(--sans);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .12s, border-color .12s;
+  }
+  button.ctrl:hover { background: var(--bg-elev-2); border-color: var(--border-strong); }
+  button.ctrl.danger { color: var(--fail); }
+  button.ctrl.danger:hover { background: var(--fail-bg); border-color: var(--fail); }
+
+  /* layout */
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+
+  /* dashboard */
+  .dashboard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 16px 0 28px;
+  }
+  .dash-card {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .dash-card .label {
+    color: var(--text-dim);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    margin-bottom: 4px;
+  }
+  .dash-card .count {
+    font-size: 22px;
+    font-weight: 600;
+    font-family: var(--mono);
+  }
+  .dash-card .breakdown {
+    color: var(--text-mute);
+    font-size: 12px;
+    font-family: var(--mono);
+    margin-top: 6px;
+  }
+  .dash-card a {
+    color: inherit;
+    text-decoration: none;
+    display: block;
+  }
+  .dash-card a:hover { color: var(--accent); }
+
+  /* TL;DR */
+  .tldr {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    margin-bottom: 28px;
+  }
+  .tldr h2 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--text-dim);
+  }
+  .tldr ul { margin: 0; padding-left: 20px; }
+  .tldr li { margin: 4px 0; }
+
+  /* section headers */
+  h2.section-heading {
+    margin: 36px 0 12px;
+    font-size: 20px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  h2.section-heading .sec-id {
+    font-family: var(--mono);
+    color: var(--accent);
+    font-size: 16px;
+  }
+  h2.section-heading .sec-meta {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--text-mute);
+    font-family: var(--mono);
+    font-weight: 400;
+  }
+  .section-blurb {
+    color: var(--text-dim);
+    margin: 0 0 14px;
+    font-size: 14px;
+  }
+
+  /* scenarios */
+  .scenario {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    overflow: hidden;
+    transition: border-color .15s;
+  }
+  .scenario[data-status="pass"] { border-left: 3px solid var(--pass); }
+  .scenario[data-status="fail"] { border-left: 3px solid var(--fail); }
+  .scenario[data-status="skip"] { border-left: 3px solid var(--skip); }
+
+  .scenario > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    user-select: none;
+  }
+  .scenario > summary::-webkit-details-marker { display: none; }
+  .scenario > summary::before {
+    content: "▸";
+    color: var(--text-mute);
+    font-size: 10px;
+    width: 12px;
+    flex-shrink: 0;
+    transition: transform .15s;
+  }
+  .scenario[open] > summary::before { transform: rotate(90deg); }
+  .scenario > summary:hover { background: var(--bg-elev-2); }
+
+  .scenario .scen-id {
+    font-family: var(--mono);
+    color: var(--text-dim);
+    font-size: 13px;
+    flex-shrink: 0;
+    min-width: 32px;
+  }
+  .scenario .scen-title { flex: 1; font-weight: 500; }
+  .scenario .status-badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-mute);
+    background: var(--bg-elev-2);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .scenario[data-status="pass"] .status-badge {
+    color: var(--pass); border-color: var(--pass); background: var(--pass-bg);
+  }
+  .scenario[data-status="fail"] .status-badge {
+    color: var(--fail); border-color: var(--fail); background: var(--fail-bg);
+  }
+  .scenario[data-status="skip"] .status-badge {
+    color: var(--skip); border-color: var(--skip); background: var(--skip-bg);
+  }
+
+  .scen-body {
+    padding: 4px 20px 18px;
+    border-top: 1px solid var(--border);
+  }
+  .scen-body h4 {
+    margin: 16px 0 8px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--text-dim);
+  }
+  .scen-body ol.steps {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .scen-body ol.steps > li {
+    counter-increment: step;
+    padding: 6px 0 6px 36px;
+    position: relative;
+    border-bottom: 1px dashed var(--border);
+  }
+  .scen-body ol.steps > li:last-child { border-bottom: none; }
+  .scen-body ol.steps > li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 8px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--bg-elev-2);
+    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+  }
+  .scen-body ol.steps { counter-reset: step; }
+  .scen-body ol.steps > li input[type="checkbox"] {
+    position: absolute;
+    right: 0;
+    top: 10px;
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .scen-body ol.steps > li.done {
+    color: var(--text-dim);
+  }
+  .scen-body ol.steps > li.done::before {
+    background: var(--pass-bg);
+    border-color: var(--pass);
+    color: var(--pass);
+  }
+  .scen-body ol.steps > li .step-content { padding-right: 28px; }
+
+  .scen-body ul { padding-left: 22px; margin: 8px 0; }
+  .scen-body ul li { margin: 4px 0; }
+  .scen-body p { margin: 6px 0; }
+
+  pre, code {
+    font-family: var(--mono);
+  }
+  code {
+    background: var(--kbd-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 8px 0;
+  }
+  pre code { background: none; padding: 0; }
+
+  .auto-cov {
+    margin-top: 14px;
+    padding: 8px 12px;
+    background: var(--bg-elev-2);
+    border-radius: 4px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .auto-cov.todo { border-left: 2px solid var(--skip); }
+  .auto-cov.covered { border-left: 2px solid var(--pass); }
+  .auto-cov.none { border-left: 2px solid var(--pending); }
+  .auto-cov code { font-size: 12px; }
+
+  .scen-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .scen-actions .lbl { color: var(--text-mute); font-size: 13px; margin-right: 6px; }
+  .scen-actions button {
+    background: var(--bg-elev-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 5px 12px;
+    border-radius: var(--radius);
+    font-family: var(--sans);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .scen-actions button:hover { border-color: var(--border-strong); }
+  .scen-actions button.pass-btn[aria-pressed="true"] {
+    background: var(--pass-bg); border-color: var(--pass); color: var(--pass);
+  }
+  .scen-actions button.fail-btn[aria-pressed="true"] {
+    background: var(--fail-bg); border-color: var(--fail); color: var(--fail);
+  }
+  .scen-actions button.skip-btn[aria-pressed="true"] {
+    background: var(--skip-bg); border-color: var(--skip); color: var(--skip);
+  }
+
+  .notes-block {
+    margin-top: 12px;
+  }
+  .notes-block label {
+    display: block;
+    color: var(--text-mute);
+    font-size: 12px;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .notes-block textarea {
+    width: 100%;
+    background: var(--code-bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    font-family: var(--mono);
+    font-size: 13px;
+    resize: vertical;
+    min-height: 44px;
+  }
+  .notes-block textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  /* TOC sidebar nav (inline at top of wrap on small screens) */
+  nav.toc {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    margin-bottom: 24px;
+    font-size: 13px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  nav.toc a {
+    color: var(--text-dim);
+    text-decoration: none;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-family: var(--mono);
+  }
+  nav.toc a:hover { color: var(--accent); background: var(--bg-elev-2); }
+
+  /* uncertainty markers (not used currently — kept for parity with spec) */
+  .marker {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+
+  /* source view */
+  details.source-view {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-top: 40px;
+  }
+  details.source-view > summary {
+    cursor: pointer;
+    padding: 12px 16px;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  details.source-view > summary:hover { background: var(--bg-elev-2); }
+  details.source-view pre {
+    margin: 0;
+    border: none;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    max-height: 70vh;
+  }
+
+  footer {
+    margin-top: 40px;
+    padding: 16px 0;
+    color: var(--text-mute);
+    font-size: 12px;
+    text-align: center;
+    border-top: 1px solid var(--border);
+  }
+  footer code { font-size: 11px; }
+
+  /* utility */
+  .hint {
+    color: var(--text-mute);
+    font-size: 12px;
+    margin-top: 6px;
+  }
+  strong { color: var(--text); }
+  a { color: var(--accent); }
+
+  @media (max-width: 720px) {
+    .wrap { padding: 16px; }
+    header.topbar { padding: 10px 16px; }
+    .scenario > summary { padding: 10px 12px; }
+    .scen-body { padding: 4px 14px 16px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      transition: none !important;
+      animation: none !important;
+    }
+    html { scroll-behavior: auto; }
+  }
+
+  @media print {
+    header.topbar, .progress-rail, .controls, .scen-actions, nav.toc { display: none; }
+    .scenario, details.source-view { break-inside: avoid; border: 1px solid #999; }
+    .scenario, details { background: white !important; color: black !important; }
+    .scenario > summary::before { content: ""; }
+    body { background: white; color: black; }
+    pre, code { background: #f4f4f4 !important; color: black !important; }
+    .scen-body { display: block !important; }
+    details:not([open]) > *:not(summary) { display: block; }
+  }
+</style>
+</head>
+<body>
+
+<div class="progress-rail" aria-hidden="true"><div class="progress-fill" id="progress-fill"></div></div>
+
+<header class="topbar">
+  <div class="topbar-row">
+    <h1 class="title">RIView QA <span class="sub">guided checklist · v1</span></h1>
+    <div class="spacer"></div>
+    <div class="stat-pills" id="overall-pills">
+      <span class="pill pass" id="pill-pass">✓ <span id="cnt-pass">0</span></span>
+      <span class="pill fail" id="pill-fail">✗ <span id="cnt-fail">0</span></span>
+      <span class="pill skip" id="pill-skip">~ <span id="cnt-skip">0</span></span>
+      <span class="pill pending" id="pill-pending">· <span id="cnt-pending">0</span></span>
+      <span class="pill" id="pill-total">/ <span id="cnt-total">0</span></span>
+    </div>
+    <div class="controls">
+      <button class="ctrl" id="btn-expand">Expand all</button>
+      <button class="ctrl" id="btn-collapse">Collapse all</button>
+      <button class="ctrl" id="btn-theme">Theme</button>
+      <button class="ctrl" id="btn-export">Export</button>
+      <button class="ctrl danger" id="btn-reset">Reset</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <nav class="toc" aria-label="Sections">
+    <a href="#tldr">TL;DR</a>
+    <a href="#setup">Setup</a>
+    <a href="#sec-a">A · Website state</a>
+    <a href="#sec-b">B · Storage</a>
+    <a href="#sec-c">C · Daemon ↔ Responder</a>
+    <a href="#sec-d">D · Validation</a>
+    <a href="#sec-e">E · Cross-cutting</a>
+    <a href="#closing">Closing</a>
+    <a href="#source">Source</a>
+  </nav>
+
+  <section class="tldr" id="tldr">
+    <h2>TL;DR</h2>
+    <ul>
+      <li><strong>What this is:</strong> a human-driven end-to-end QA pass over RIView's website, daemon, and responder loop. Confirmed by source.</li>
+      <li><strong>Scope:</strong> 27 scenarios across 5 areas — website-only state, storage invariants, daemon ↔ responder loop, validation, cross-cutting.</li>
+      <li><strong>Before starting:</strong> run <code>python3 -m pytest tests/</code>. All 75 should pass.</li>
+      <li><strong>What to track per scenario:</strong> step completion, pass/fail/skip status, free-form notes. Everything persists in this browser's localStorage.</li>
+      <li><strong>Auto-coverage badges:</strong> green = existing test in <code>tests/test_daemon.py</code>; amber = TODO test gap flagged in the plan.</li>
+      <li><strong>Dynamic loop scenarios (C1–C7):</strong> can be driven by a second terminal simulating the responder, or by the real <code>riview-respond</code> agent.</li>
+      <li><strong>Cleanup:</strong> <code>kill $DAEMON_PID && rm -rf .riview/</code> at the end of the run.</li>
+    </ul>
+  </section>
+
+  <h2 class="section-heading">Dashboard</h2>
+  <div class="dashboard" id="dashboard">
+    <!-- populated by JS from section-counts -->
+  </div>
+
+  <section id="setup">
+    <h2 class="section-heading"><span class="sec-id">setup</span> One-time setup <span class="sec-meta" data-section-meta="setup"></span></h2>
+    <p class="section-blurb">Get the daemon running, a clean session registered, and a browser tab open before starting section A.</p>
+    <details class="scenario" data-id="setup" data-section="setup">
+      <summary>
+        <span class="scen-id">SET</span>
+        <span class="scen-title">Boot daemon and register a fresh sample session</span>
+        <span class="status-badge">pending</span>
+      </summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content"><code>cd $REPO</code> (your RIView checkout).</div></li>
+          <li><div class="step-content"><code>rm -rf .riview/</code> — start clean.</div></li>
+          <li><div class="step-content"><code>git status</code> — confirm <code>.riview/</code> is gitignored (no entries listed).</div></li>
+          <li><div class="step-content"><code>python3 -m pytest tests/</code> — baseline green.</div></li>
+          <li><div class="step-content">Boot the daemon in the background:
+            <pre>python3 scripts/riview.py daemon &amp;
+DAEMON_PID=$!
+sleep 1</pre></div></li>
+          <li><div class="step-content">Register the sample spec: <code>python3 scripts/riview.py submit sample</code>. Capture <code>&lt;sid&gt;</code> from output.</div></li>
+          <li><div class="step-content">Open <code>http://127.0.0.1:7891/sessions/&lt;sid&gt;</code> in a browser tab.</div></li>
+        </ol>
+        <h4>Mid-run resets</h4>
+        <p>To wipe only the overlay (keep revisions): <code>rm -rf .riview/sessions/&lt;sid&gt;/reviews/*/review.json</code>.</p>
+        <p>To tear down: <code>kill $DAEMON_PID &amp;&amp; rm -rf .riview/</code>.</p>
+        <div class="scen-actions">
+          <span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block">
+          <label>Notes</label>
+          <textarea data-notes placeholder="Findings, surprises, $REPO and sid recorded here…"></textarea>
+        </div>
+      </div>
+    </details>
+  </section>
+
+  <!-- SECTION A -->
+  <section id="sec-a">
+    <h2 class="section-heading"><span class="sec-id">A</span> Website-only state <span class="sec-meta" data-section-meta="a"></span></h2>
+    <p class="section-blurb">No agent in the loop. Pure submit / reload / overlay-merge semantics in the browser ↔ daemon path.</p>
+
+    <details class="scenario" data-id="a1" data-section="a">
+      <summary><span class="scen-id">A1</span><span class="scen-title">Submit-then-reload persistence (happy path)</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Open <code>/sessions/&lt;sid&gt;</code>.</div></li>
+          <li><div class="step-content">Pick a decision card. Change status <code>ai-confident</code> → <code>confirmed</code>. Type comment "QA A1".</div></li>
+          <li><div class="step-content">Click Submit on that card. Watch for the success indicator.</div></li>
+          <li><div class="step-content">Hard reload (<code>Cmd+Shift+R</code>).</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Status select shows <code>confirmed</code>. Comment textarea shows "QA A1".</li>
+          <li>Card is <strong>untouched</strong> (border = status color, Submit button disabled).</li>
+          <li><code>cat .riview/sessions/&lt;sid&gt;/reviews/1/review.json</code> shows the entry with <code>new_status: confirmed</code> and <code>comment: "QA A1"</code>.</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_session_page_renders_overlay_status_and_comment</code></div>
+        <div class="scen-actions">
+          <span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="a2" data-section="a">
+      <summary><span class="scen-id">A2</span><span class="scen-title">Partial resubmit preserves siblings</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Continuing from A1, edit <strong>only</strong> the comment ("QA A2"). Don't touch status.</div></li>
+          <li><div class="step-content">Submit.</div></li>
+          <li><div class="step-content">Reload. Inspect <code>reviews/1/review.json</code>.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Comment is now "QA A2"; status entry still <code>confirmed</code> (preserved by full-entry contract).</li>
+          <li>Card untouched after reload.</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_partial_field_resubmit_preserves_other_overlay_fields</code></div>
+        <div class="scen-actions">
+          <span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="a3" data-section="a">
+      <summary><span class="scen-id">A3</span><span class="scen-title">Clear-only-field eviction (<code>cleared_fields</code>)</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Find a decision card with <strong>only a comment</strong> in the overlay (or run A1 with a no-op status change, then resubmit clearing the status separately so only <code>comment</code> remains).</div></li>
+          <li><div class="step-content">Verify in <code>reviews/1/review.json</code> the entry is <code>{node_id, comment: "..."}</code> (single field beyond <code>node_id</code>).</div></li>
+          <li><div class="step-content">Blank the comment textarea. Submit.</div></li>
+          <li><div class="step-content">Reload. Inspect <code>reviews/1/review.json</code>.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>The node's entry is <strong>gone</strong> from <code>review.json</code>.</li>
+          <li>Card shows pure canonical state (no overlay border, no comment).</li>
+          <li>The on-disk file does <strong>not</strong> contain <code>cleared_fields</code> (stripped before persist).</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_clear_comment_only_overlay_evicts_node_via_cleared_fields</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="a4" data-section="a">
+      <summary><span class="scen-id">A4</span><span class="scen-title">Partial clear preserves other overlay fields</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Set up a card with overlay <code>{new_status: confirmed, comment: "keep status"}</code>.</div></li>
+          <li><div class="step-content">Blank only the comment; keep status submitted as <code>confirmed</code>. Submit.</div></li>
+          <li><div class="step-content">Reload. Inspect <code>reviews/1/review.json</code>.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Entry is now <code>{node_id, new_status: confirmed}</code>. No <code>comment</code> field.</li>
+          <li>Card pre-fills status <code>confirmed</code>, comment empty, untouched.</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_cleared_fields_with_other_fields_drops_only_listed</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="a5" data-section="a">
+      <summary><span class="scen-id">A5</span><span class="scen-title">Ambiguity resolution lifecycle</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Find an ambiguity card. Select a resolution (e.g. <code>resolved</code>), pick an option, add comment "A5-first". Submit.</div></li>
+          <li><div class="step-content">Reload. Confirm pre-fill + untouched.</div></li>
+          <li><div class="step-content">Change resolution to <code>deferred</code>. Submit.</div></li>
+          <li><div class="step-content">Reload again.</div></li>
+          <li><div class="step-content">Blank the comment and change status back to <code>open</code> (should also drop resolution). Submit. Reload.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li><strong>After step 2:</strong> overlay entry has <code>new_status: resolved</code>, the chosen resolution, comment "A5-first". Card untouched.</li>
+          <li><strong>After step 4:</strong> resolution updated; status/comment preserved.</li>
+          <li><strong>After step 5:</strong> card returns to canonical; entry gone from <code>review.json</code>. Resolution selector reverts (<code>advanceBaselineFromEntry</code> clears <code>applied.resolution</code> when overlay omits it).</li>
+        </ul>
+        <div class="auto-cov todo"><strong>Auto-coverage:</strong> none directly. <strong>TODO:</strong> add <code>test_ambiguity_resolution_overlay_lifecycle</code>.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="a6" data-section="a">
+      <summary><span class="scen-id">A6</span><span class="scen-title">Body edit overlay</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Click into a node's body editor; edit the prose. Submit the card.</div></li>
+          <li><div class="step-content">Reload. Inspect the overlay JSON island in page source (<code>&lt;script id="overlay-entries"&gt;</code>).</div></li>
+          <li><div class="step-content">Edit the body again, then blank only the body (revert to canonical). Submit. Reload.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li><strong>After step 2:</strong> body shows edited content; "edited" marker visible; overlay entry includes <code>body_edit</code>.</li>
+          <li><strong>After step 3:</strong> body returns to canonical; <code>body_edit</code> removed from entry. If body_edit was the only overlay field, the node is evicted entirely.</li>
+        </ul>
+        <div class="auto-cov todo"><strong>Auto-coverage:</strong> indirect (overlay merge tested with body_edit). <strong>TODO:</strong> add <code>test_body_edit_overlay_clears_via_cleared_fields</code>.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="a7" data-section="a">
+      <summary><span class="scen-id">A7</span><span class="scen-title">Submit-all with mixed cards</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Touch three cards of different kinds (one decision, one ambiguity, one risk). Different changes on each.</div></li>
+          <li><div class="step-content">Click the global Submit-all button.</div></li>
+          <li><div class="step-content">Watch the response handler. Reload.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>All three persist (entries in <code>review.json</code>).</li>
+          <li>If the responder happens to roll forward mid-submit, conflict response surfaces per-card (see C4) — non-conflicting cards still merged.</li>
+          <li>After reload, every card pre-fills + untouched.</li>
+        </ul>
+        <div class="auto-cov todo"><strong>Auto-coverage:</strong> none at HTTP layer for submit-all. <strong>TODO:</strong> add <code>test_review_post_batch_mixed_entries_accepted</code>.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="a8" data-section="a">
+      <summary><span class="scen-id">A8</span><span class="scen-title">Draft persistence (localStorage)</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Type "draft-A8" into a card's comment. <strong>Do not submit.</strong></div></li>
+          <li><div class="step-content">Reload.</div></li>
+          <li><div class="step-content">Inspect localStorage in devtools: key <code>riview:draft:&lt;sid&gt;:1</code> should exist.</div></li>
+          <li><div class="step-content">Submit the card (with the restored draft).</div></li>
+          <li><div class="step-content">Reload.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li><strong>After step 2:</strong> comment textarea contains "draft-A8"; card shows as <strong>touched</strong>; Submit enabled.</li>
+          <li><strong>After step 5:</strong> draft key for this node is gone from localStorage; card untouched (overlay took over).</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> wiring via <code>test_session_page_includes_draft_persistence_keys</code>. Roundtrip is browser-only.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="a9" data-section="a">
+      <summary><span class="scen-id">A9</span><span class="scen-title">Draft retention window (last 5 revisions)</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Type a draft against revision 1.</div></li>
+          <li><div class="step-content">Cause the session to advance to revision 6+ (six responder rolls, or six fake submits in a script).</div></li>
+          <li><div class="step-content">Reload at the latest revision and inspect localStorage.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul><li>Only keys for the latest five revisions remain. Revision 1's draft key is evicted.</li></ul>
+        <div class="auto-cov none"><strong>Auto-coverage:</strong> client-only. Manual check sufficient.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- SECTION B -->
+  <section id="sec-b">
+    <h2 class="section-heading"><span class="sec-id">B</span> Storage / repo-local invariants <span class="sec-meta" data-section-meta="b"></span></h2>
+    <p class="section-blurb">Confirm sessions land in <code>&lt;repo&gt;/.riview/</code> by default and that <code>RIVIEW_HOME</code> overrides cleanly.</p>
+
+    <details class="scenario" data-id="b1" data-section="b">
+      <summary><span class="scen-id">B1</span><span class="scen-title">Default storage root is <code>&lt;repo&gt;/.riview/</code></span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Fresh terminal, no <code>RIVIEW_HOME</code> set.</div></li>
+          <li><div class="step-content"><code>python3 scripts/riview.py daemon &amp;</code> then <code>submit</code> a spec.</div></li>
+          <li><div class="step-content"><code>ls $REPO/.riview/sessions/</code> and <code>git status</code>.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Session dir lives under <code>$REPO/.riview/sessions/</code>.</li>
+          <li><code>git status</code> lists nothing under <code>.riview/</code> (gitignored).</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>RiviewStorageRootTests::test_default_is_repo_local</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="b2" data-section="b">
+      <summary><span class="scen-id">B2</span><span class="scen-title"><code>RIVIEW_HOME</code> override</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content"><code>RIVIEW_HOME=/tmp/riview-qa python3 scripts/riview.py daemon &amp;</code></div></li>
+          <li><div class="step-content"><code>RIVIEW_HOME=/tmp/riview-qa python3 scripts/riview.py submit sample</code></div></li>
+          <li><div class="step-content">Check <code>/tmp/riview-qa/sessions/</code> and <code>$REPO/.riview/</code>.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul><li>Session lands in <code>/tmp/riview-qa/</code>. Repo's <code>.riview/</code> is empty or absent.</li></ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>RiviewStorageRootTests::test_env_override_wins</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- SECTION C -->
+  <section id="sec-c">
+    <h2 class="section-heading"><span class="sec-id">C</span> Daemon ↔ Responder loop <span class="sec-meta" data-section-meta="c"></span></h2>
+    <p class="section-blurb">Simulate the responder with a second terminal that re-submits the spec (advancing revision), or run the real <code>riview-respond</code> agent against the session.</p>
+
+    <details class="scenario" data-id="c1" data-section="c">
+      <summary><span class="scen-id">C1</span><span class="scen-title">Fresh revision shows empty overlay</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">From the A1 state (revision 1 has an overlay), responder writes a new revision:
+            <pre># Edit sample/spec.md to change something canonical
+python3 scripts/riview.py submit sample --session &lt;sid&gt;</pre></div></li>
+          <li><div class="step-content">Reload the browser tab on <code>/sessions/&lt;sid&gt;</code>.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Page now shows revision 2 (check <code>&lt;script id="submit-config"&gt;</code> for <code>base_revision: 2</code>).</li>
+          <li>All cards canonical: no overlay borders, comments empty, statuses match the new spec.</li>
+          <li>No <code>reviews/2/review.json</code> exists.</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> partial — <code>test_session_page_with_no_overlay_renders_empty_overlay_comments</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="c2" data-section="c">
+      <summary><span class="scen-id">C2</span><span class="scen-title">Submit while responder watches <code>/wait</code></span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">In a second terminal: <code>python3 scripts/riview.py wait &lt;sid&gt;</code>.</div></li>
+          <li><div class="step-content">In the browser, edit and submit a card on revision 2.</div></li>
+          <li><div class="step-content">Watch the <code>wait</code> call return.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>The <code>wait</code> call returns 200 with the new event cursor as soon as the POST completes.</li>
+          <li>The responder (or its stand-in) can then <code>pull</code> the latest review and apply it.</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_wait_wakes_on_review_post</code>, <code>test_cli_wait_unblocks_on_review_post</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="c3" data-section="c">
+      <summary><span class="scen-id">C3</span><span class="scen-title">Stale base, no node change (clean accept)</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">On revision 2, open the page (base_revision=2). Edit a comment, but <strong>do not submit yet</strong>.</div></li>
+          <li><div class="step-content">In another terminal, responder rolls forward to revision 3 <strong>without changing the node you're editing</strong>:
+            <pre># Edit a different node's body in sample/spec.md
+python3 scripts/riview.py submit sample --session &lt;sid&gt;</pre></div></li>
+          <li><div class="step-content">Submit your card (still on the stale base_revision=2 page).</div></li>
+          <li><div class="step-content">Reload.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Submit response: <code>accepted: [{node_id: &lt;yours&gt;}]</code>, <code>conflicts: []</code>, <code>current_revision: 3</code>.</li>
+          <li>After reload, the page is now on revision 3 with the overlay merged in.</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_stale_submit_accepts_unchanged_node_conflicts_changed_node</code>, <code>test_stale_submit_with_base_equal_current_is_clean_accept</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="c4" data-section="c">
+      <summary><span class="scen-id">C4</span><span class="scen-title">Stale base, conflicting node change</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">On revision 3, open the page, edit a card's comment ("C4 pre-conflict"). Don't submit.</div></li>
+          <li><div class="step-content">Responder rolls forward to revision 4 <strong>changing the same node's body</strong>.</div></li>
+          <li><div class="step-content">Submit on the stale page.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Submit response: <code>conflicts: [{node_id, reason: "fingerprint_mismatch", base_revision: 3, current_revision: 4}]</code>, <code>accepted: []</code>.</li>
+          <li>UI surfaces the conflict (card stays touched; user has a path to reload).</li>
+          <li>No entry merged into <code>reviews/4/review.json</code> for that node.</li>
+        </ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_stale_submit_accepts_unchanged_node_conflicts_changed_node</code>, <code>test_stale_submit_body_edit_detected_as_conflict</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="c5" data-section="c">
+      <summary><span class="scen-id">C5</span><span class="scen-title">Multi-revision overlay isolation</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Submit a card on revision 4 (overlay lands in <code>reviews/4/review.json</code>).</div></li>
+          <li><div class="step-content">Responder rolls forward to revision 5.</div></li>
+          <li><div class="step-content">Inspect <code>reviews/4/review.json</code> and <code>reviews/5/review.json</code>.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li><code>reviews/4/review.json</code> still holds the revision-4 overlay (history preserved).</li>
+          <li><code>reviews/5/review.json</code> does <strong>not</strong> exist — overlay does not bleed forward.</li>
+          <li>Page on revision 5 renders canonical.</li>
+        </ul>
+        <div class="auto-cov todo"><strong>Auto-coverage:</strong> partial. <strong>TODO:</strong> add <code>test_overlay_isolated_per_revision</code>.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="c6" data-section="c">
+      <summary><span class="scen-id">C6</span><span class="scen-title"><code>apply.py</code> never sees <code>cleared_fields</code></span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Submit a card with <code>cleared_fields</code> (any A3/A4 scenario).</div></li>
+          <li><div class="step-content">Cat the resulting <code>reviews/N/review.json</code>.</div></li>
+          <li><div class="step-content">Run <code>apply.py</code> against a copy of the spec (mutates in place; copy first):
+            <pre>cp -r sample /tmp/qa-apply-out
+python3 scripts/apply.py /tmp/qa-apply-out \
+  .riview/sessions/&lt;sid&gt;/reviews/N/review.json \
+  --basename spec --dry-run</pre></div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li><code>review.json</code> contains no <code>cleared_fields</code> key on any entry (stripped pre-persist).</li>
+          <li><code>apply.py</code> runs to completion. Output spec matches expectations (cleared comments simply absent).</li>
+        </ul>
+        <div class="auto-cov todo"><strong>Auto-coverage:</strong> none directly. <strong>TODO:</strong> add <code>test_persisted_review_strips_cleared_fields_marker</code>.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="c7" data-section="c">
+      <summary><span class="scen-id">C7</span><span class="scen-title">Responder pulls applied review, advances cleanly</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Submit a multi-card review on the current revision.</div></li>
+          <li><div class="step-content">Simulate the responder loop:
+            <pre>python3 scripts/riview.py pull &lt;sid&gt; &gt; /tmp/qa-pull.json
+diff /tmp/qa-pull.json .riview/sessions/&lt;sid&gt;/reviews/&lt;current&gt;/review.json
+# Apply in place, then submit next revision:
+python3 scripts/apply.py sample /tmp/qa-pull.json --basename spec
+python3 scripts/riview.py submit sample --session &lt;sid&gt;</pre></div></li>
+          <li><div class="step-content">Reload browser.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li><code>pull</code> output equals <code>review.json</code> byte-for-byte.</li>
+          <li><code>apply.py</code> writes new spec content reflecting confirmed statuses.</li>
+          <li>New revision page renders the applied state as canonical; previous overlay no longer needed.</li>
+        </ul>
+        <div class="auto-cov none"><strong>Auto-coverage:</strong> apply path covered; full responder loop is integration-only.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- SECTION D -->
+  <section id="sec-d">
+    <h2 class="section-heading"><span class="sec-id">D</span> Validation &amp; error paths <span class="sec-meta" data-section-meta="d"></span></h2>
+    <p class="section-blurb">Hand-rolled <code>curl</code> probes against the daemon. Set <code>TOKEN=$(cat .riview/token)</code> first.</p>
+
+    <details class="scenario" data-id="d1" data-section="d">
+      <summary><span class="scen-id">D1</span><span class="scen-title">Malformed <code>cleared_fields</code> → 400</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Run the curl below, then repeat with <code>cleared_fields: ["unknown_field"]</code>, <code>cleared_fields: [123]</code>, <code>cleared_fields: null</code>:
+            <pre>curl -i -X POST http://127.0.0.1:7891/sessions/&lt;sid&gt;/review \
+  -H "X-Riview-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"spec_id":"&lt;id&gt;","spec_version":1,"base_revision":1,
+       "reviews":[{"node_id":"some-id","cleared_fields":"comment"}]}'</pre></div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul><li>All four return HTTP 400 with a clear error message. No mutation on disk.</li></ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_cleared_fields_rejects_malformed_values</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="d2" data-section="d">
+      <summary><span class="scen-id">D2</span><span class="scen-title">Empty entry silently filtered</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">POST an entry with only <code>node_id</code> (no other fields, no <code>cleared_fields</code>):
+            <pre>curl -i -X POST http://127.0.0.1:7891/sessions/&lt;sid&gt;/review \
+  -H "X-Riview-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"spec_id":"&lt;id&gt;","spec_version":1,"base_revision":1,
+       "reviews":[{"node_id":"some-id"}]}'</pre></div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul><li>200, <code>accepted: []</code>, no merge.</li></ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_review_post_drops_empty_entries_silently</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="d3" data-section="d">
+      <summary><span class="scen-id">D3</span><span class="scen-title">Unknown <code>node_id</code></span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Same as D2 but with <code>node_id: "does-not-exist"</code> and at least one populated field (e.g. <code>comment: "x"</code>) so it isn't silently filtered.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul><li>400 (or whatever the existing test asserts).</li></ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_review_post_rejects_unknown_node_id</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="d4" data-section="d">
+      <summary><span class="scen-id">D4</span><span class="scen-title">Bad / missing token</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">POST with no <code>X-Riview-Token</code> header.</div></li>
+          <li><div class="step-content">POST with <code>X-Riview-Token: wrong</code>.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul><li>401 / 403 per existing tests. No mutation.</li></ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_review_post_requires_token</code>, <code>test_review_post_bad_token</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- SECTION E -->
+  <section id="sec-e">
+    <h2 class="section-heading"><span class="sec-id">E</span> Cross-cutting <span class="sec-meta" data-section-meta="e"></span></h2>
+    <p class="section-blurb">Invariants and edge cases that span the other sections — overlay isolation from the applier slot, color-coding, mid-flight refresh, multi-tab semantics.</p>
+
+    <details class="scenario" data-id="e1" data-section="e">
+      <summary><span class="scen-id">E1</span><span class="scen-title">Overlay does not bleed into <code>node.review.comment</code></span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Run any A scenario that submits comments.</div></li>
+          <li><div class="step-content"><code>cat .riview/sessions/&lt;sid&gt;/revisions/&lt;N&gt;/decisions.json | jq '.nodes[].review'</code></div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul><li>Every node's <code>review.comment</code> is empty / absent. Comments live in <code>reviews/&lt;N&gt;/review.json</code> only, never in the per-revision sidecar.</li></ul>
+        <div class="auto-cov covered"><strong>Auto-coverage:</strong> <code>test_overlay_does_not_persist_into_node_review_comment</code></div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="e2" data-section="e">
+      <summary><span class="scen-id">E2</span><span class="scen-title">Color-coding tracks status</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Cycle one decision card through <code>ai-confident</code> → <code>confirmed</code> → <code>rejected</code> → <code>needs-work</code>, submitting + reloading between each.</div></li>
+          <li><div class="step-content">Confirm card border/background color shifts each time.</div></li>
+          <li><div class="step-content">Repeat for an ambiguity (<code>open</code> / <code>resolved</code> / <code>deferred</code>) and a risk (<code>open</code> / <code>accepted</code> / <code>mitigated</code> / <code>dismissed</code>).</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Color matches the status enum at every reload.</li>
+          <li>"Upstream changed" badge stays quiet on pure approvals (per commit <code>dc8e1f0</code>).</li>
+        </ul>
+        <div class="auto-cov none"><strong>Auto-coverage:</strong> none (CSS-only). Manual visual check.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="e3" data-section="e">
+      <summary><span class="scen-id">E3</span><span class="scen-title">Refresh during pending submit</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Throttle network in devtools (e.g. Slow 3G).</div></li>
+          <li><div class="step-content">Edit a card. Click Submit. Before the response arrives, hard-reload.</div></li>
+          <li><div class="step-content">Wait for everything to settle. Inspect <code>review.json</code> and the UI.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Either the submit landed (overlay reflects it on reload) or it didn't (draft restored from localStorage, card touched). <strong>Never</strong> both partially applied.</li>
+          <li>No JS errors in console; no orphaned in-flight state.</li>
+        </ul>
+        <div class="auto-cov none"><strong>Auto-coverage:</strong> none (client-only race). Manual check.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="e4" data-section="e">
+      <summary><span class="scen-id">E4</span><span class="scen-title">Two browser tabs, different cards</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Open <code>/sessions/&lt;sid&gt;</code> in tab A and tab B (same revision).</div></li>
+          <li><div class="step-content">In tab A, submit a card.</div></li>
+          <li><div class="step-content">In tab B (no reload), submit a <em>different</em> card.</div></li>
+          <li><div class="step-content">Reload both.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>Both submissions persist (different nodes; ADR-0005 by-node-id merge).</li>
+          <li>Both tabs after reload show both overlay entries, untouched.</li>
+        </ul>
+        <div class="auto-cov none"><strong>Auto-coverage:</strong> none directly. Single-tab semantics covered.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+
+    <details class="scenario" data-id="e5" data-section="e">
+      <summary><span class="scen-id">E5</span><span class="scen-title">Two tabs editing the same card (last-write-wins)</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">Open <code>/sessions/&lt;sid&gt;</code> in tabs A and B.</div></li>
+          <li><div class="step-content">In A, submit a comment "tab-A".</div></li>
+          <li><div class="step-content">In B (still showing pre-submit state for that card), submit "tab-B" without reloading first.</div></li>
+        </ol>
+        <h4>Expected</h4>
+        <ul>
+          <li>B's submit succeeds (same <code>base_revision</code>, fingerprint matches because canonical node hasn't changed). Overlay entry ends with <code>comment: "tab-B"</code> (last-write-wins by node_id).</li>
+          <li>Reload of A shows "tab-B". Documented behavior, not a bug.</li>
+        </ul>
+        <div class="auto-cov todo"><strong>Auto-coverage:</strong> none. <strong>TODO</strong> (optional): <code>test_same_node_resubmit_last_write_wins</code>.</div>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Notes</label><textarea data-notes></textarea></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- CLOSING -->
+  <section id="closing">
+    <h2 class="section-heading"><span class="sec-id">end</span> Closing checklist</h2>
+    <details class="scenario" data-id="close" data-section="close" open>
+      <summary><span class="scen-id">END</span><span class="scen-title">Final verification</span><span class="status-badge">pending</span></summary>
+      <div class="scen-body">
+        <h4>Steps</h4>
+        <ol class="steps">
+          <li><div class="step-content">All A scenarios above pass.</div></li>
+          <li><div class="step-content">B1 and B2 pass.</div></li>
+          <li><div class="step-content">All C scenarios pass.</div></li>
+          <li><div class="step-content">All D scenarios return the right status codes; no mutation on rejections.</div></li>
+          <li><div class="step-content">E1–E5 noted; surprises captured in scenario notes.</div></li>
+          <li><div class="step-content"><code>python3 -m pytest tests/</code> still green.</div></li>
+          <li><div class="step-content"><code>git status</code> shows only intentional changes (no stray <code>.riview/</code>, no debugging files).</div></li>
+        </ol>
+        <h4>Tests to add (carried from plan)</h4>
+        <ul>
+          <li><code>test_ambiguity_resolution_overlay_lifecycle</code> — A5</li>
+          <li><code>test_body_edit_overlay_clears_via_cleared_fields</code> — A6</li>
+          <li><code>test_review_post_batch_mixed_entries_accepted</code> — A7</li>
+          <li><code>test_overlay_isolated_per_revision</code> — C5</li>
+          <li><code>test_persisted_review_strips_cleared_fields_marker</code> — C6</li>
+          <li><code>test_same_node_resubmit_last_write_wins</code> (optional) — E5</li>
+        </ul>
+        <div class="scen-actions"><span class="lbl">Status:</span>
+          <button class="pass-btn" data-act="pass">Pass</button>
+          <button class="fail-btn" data-act="fail">Fail</button>
+          <button class="skip-btn" data-act="skip">Skip</button>
+          <button data-act="clear">Clear</button>
+        </div>
+        <div class="notes-block"><label>Final notes</label><textarea data-notes placeholder="Overall summary of the run, anything to revisit…"></textarea></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- SOURCE VIEW -->
+  <details class="source-view" id="source">
+    <summary>📄 Raw source — <code>docs/qa/qa-plan.md</code> (click to expand)</summary>
+    <pre id="raw-source-output"></pre>
+  </details>
+
+  <footer>
+    Generated from <code>docs/qa/qa-plan.md</code>. State persists in this browser's localStorage under <code>riview:qa:v1:*</code>. Use <strong>Export</strong> to capture results, <strong>Reset</strong> to wipe.
+  </footer>
+</main>
+
+<!-- Raw source embedded as text/markdown so the source-view shows the canonical plan -->
+<script type="text/markdown" id="raw-source">
+# RIView end-to-end QA plan
+
+Human-driven test plan for the website + daemon + responder loop. Each scenario lists steps, the expected outcome, and whether automated coverage exists in `tests/test_daemon.py`.
+
+Out of scope: anything covered exclusively by the test suite that has no UX surface (e.g. token file permissions). Run `python3 -m pytest tests/` before starting.
+
+## Conventions
+
+- `$REPO` = path to this checkout (the RIView daemon repo).
+- `$SAMPLE` = `$REPO/sample` (markdown + decisions fixture used below).
+- `<sid>` = the session id printed by `register` / `submit`.
+- "Reload" = browser hard reload (Cmd+Shift+R). Plain reload also fine — the server is the source of truth.
+- All `curl` examples assume the daemon token is read from `<RIVIEW_HOME>/token`.
+
+## One-time setup
+
+```bash
+cd $REPO
+rm -rf .riview/                                 # start clean
+git status                                      # confirm .riview/ not tracked
+python3 -m pytest tests/                        # baseline green
+python3 scripts/riview.py daemon &              # 127.0.0.1:7891
+DAEMON_PID=$!
+sleep 1
+python3 scripts/riview.py submit $SAMPLE
+# capture <sid> from output; open http://127.0.0.1:7891/sessions/<sid>
+```
+
+Teardown: `kill $DAEMON_PID && rm -rf .riview/`.
+
+A "reset to clean revision" mid-run:
+
+```bash
+rm -rf .riview/sessions/<sid>/reviews/*/review.json
+```
+
+(removes overlay only; spec snapshots stay).
+
+---
+
+## A. Website-only state
+
+### A1 — Submit-then-reload persistence (happy path)
+
+**Steps**
+1. Open `/sessions/<sid>`.
+2. Pick a decision card. Change status from `ai-confident` → `confirmed`. Type a comment "QA A1".
+3. Click Submit on that card. Watch for the success indicator.
+4. Hard reload.
+
+**Expected**
+- Status select shows `confirmed`. Comment textarea shows "QA A1".
+- Card is **untouched** (border = status color, Submit button disabled).
+- `cat .riview/sessions/<sid>/reviews/1/review.json` shows the entry with `new_status: confirmed` and `comment: "QA A1"`.
+
+**Auto-coverage:** `test_session_page_renders_overlay_status_and_comment`.
+
+### A2 — Partial resubmit preserves siblings
+
+**Steps**
+1. Continuing from A1, edit only the comment ("QA A2"). Don't touch status.
+2. Submit.
+3. Reload. Inspect `reviews/1/review.json`.
+
+**Expected**
+- Comment is now "QA A2"; status entry still `confirmed`.
+- Card untouched after reload.
+
+**Auto-coverage:** `test_partial_field_resubmit_preserves_other_overlay_fields`.
+
+### A3 — Clear-only-field eviction (`cleared_fields`)
+
+**Steps**
+1. Find a decision card with **only a comment** in the overlay (or run A1 with a no-op status change, then resubmit clearing the status separately so only `comment` remains).
+2. Verify in `reviews/1/review.json` the entry is `{node_id, comment: "..."}` (single field beyond `node_id`).
+3. Blank the comment textarea. Submit.
+4. Reload. Inspect `reviews/1/review.json`.
+
+**Expected**
+- The node's entry is **gone** from `review.json`.
+- Card shows pure canonical state (no overlay border, no comment).
+- The on-disk file does **not** contain `cleared_fields` (it was stripped before persist).
+
+**Auto-coverage:** `test_clear_comment_only_overlay_evicts_node_via_cleared_fields`.
+
+### A4 — Partial clear preserves other overlay fields
+
+**Steps**
+1. Set up a card with overlay `{new_status: confirmed, comment: "keep status"}`.
+2. Blank only the comment; keep status submitted as `confirmed`. Submit.
+3. Reload. Inspect `reviews/1/review.json`.
+
+**Expected**
+- Entry is now `{node_id, new_status: confirmed}`. No `comment` field.
+- Card pre-fills status `confirmed`, comment empty, untouched.
+
+**Auto-coverage:** `test_cleared_fields_with_other_fields_drops_only_listed`.
+
+### A5 — Ambiguity resolution lifecycle
+
+**Steps**
+1. Find an ambiguity card. Select a resolution (e.g. `resolved`), pick an option, add a comment "A5-first". Submit.
+2. Reload. Confirm pre-fill + untouched.
+3. Change resolution to `deferred`. Submit.
+4. Reload again.
+5. Now blank the comment and change status back to `open` (which should also drop resolution). Submit. Reload.
+
+**Expected after step 2:** overlay entry has `new_status: resolved`, the chosen resolution, comment "A5-first". Card untouched.
+**Expected after step 4:** resolution updated; status/comment preserved.
+**Expected after step 5:** card returns to canonical; entry gone from `review.json`. The page's resolution selector reverts to canonical (the `advanceBaselineFromEntry` path clears `applied.resolution` when overlay omits it).
+
+**Auto-coverage:** None directly. **TODO**: add `test_ambiguity_resolution_overlay_lifecycle` covering submit → resubmit → clear via `cleared_fields: ["resolution", "comment"]`.
+
+### A6 — Body edit overlay
+
+**Steps**
+1. Click into a node's body editor; edit the prose. Submit the card.
+2. Reload. Inspect overlay JSON island in page source (`<script id="overlay-entries">`).
+3. Edit the body again, then blank only the body (revert to canonical). Submit. Reload.
+
+**Expected after step 2:** body shows edited content; "edited" marker visible; overlay entry includes `body_edit`.
+**Expected after step 3:** body returns to canonical; `body_edit` removed from entry. If body_edit was the only overlay field, the node is evicted entirely.
+
+**Auto-coverage:** Indirect (overlay merge tested with body_edit in `_apply_overlay_to_spec`). **TODO**: add `test_body_edit_overlay_clears_via_cleared_fields`.
+
+### A7 — Submit-all with mixed cards
+
+**Steps**
+1. Touch three cards of different kinds (one decision, one ambiguity, one risk). Different changes on each.
+2. Click the global Submit-all button.
+3. Watch the response handler. Reload.
+
+**Expected**
+- All three persist (entries in `review.json`).
+- If the responder happens to roll forward mid-submit, conflict response surfaces per-card (see C4) — non-conflicting cards still merged.
+- After reload, every card pre-fills + untouched.
+
+**Auto-coverage:** None at the HTTP layer for submit-all. **TODO**: add `test_review_post_batch_mixed_entries_accepted` (the daemon endpoint is already batch-capable; we just don't exercise it in a test).
+
+### A8 — Draft persistence (localStorage)
+
+**Steps**
+1. Type "draft-A8" into a card's comment. **Do not submit.**
+2. Reload.
+3. Inspect localStorage in devtools: key `riview:draft:<sid>:1` should exist.
+4. Submit the card (with the restored draft).
+5. Reload.
+
+**Expected after step 2:** comment textarea contains "draft-A8"; card shows as **touched**; Submit enabled.
+**Expected after step 5:** draft key for this node is gone from localStorage; card untouched (overlay took over).
+
+**Auto-coverage:** Wiring tested by `test_session_page_includes_draft_persistence_keys`. Roundtrip is browser-only.
+
+### A9 — Draft retention window
+
+**Steps**
+1. Type a draft against revision 1.
+2. Cause the session to advance to revision 6+ (six responder rolls, or six fake submits in a script).
+3. Reload at the latest revision and inspect localStorage.
+
+**Expected**
+- Only keys for the latest five revisions remain. Revision 1's draft key is evicted.
+
+**Auto-coverage:** Client-only. Manual check sufficient.
+
+---
+
+## B. Storage / repo-local invariants
+
+### B1 — Default storage root is `<repo>/.riview/`
+
+**Steps**
+1. Fresh terminal, no `RIVIEW_HOME` set.
+2. `python3 scripts/riview.py daemon &` then `submit` a spec.
+3. `ls $REPO/.riview/sessions/` and `git status`.
+
+**Expected**
+- Session dir lives under `$REPO/.riview/sessions/`.
+- `git status` lists nothing under `.riview/` (gitignored).
+
+**Auto-coverage:** `RiviewStorageRootTests::test_default_is_repo_local`.
+
+### B2 — `RIVIEW_HOME` override
+
+**Steps**
+1. `RIVIEW_HOME=/tmp/riview-qa python3 scripts/riview.py daemon &`
+2. `RIVIEW_HOME=/tmp/riview-qa python3 scripts/riview.py submit $SAMPLE`
+3. Check `/tmp/riview-qa/sessions/` and `$REPO/.riview/`.
+
+**Expected**
+- Session lands in `/tmp/riview-qa/`. Repo's `.riview/` is empty or absent.
+
+**Auto-coverage:** `RiviewStorageRootTests::test_env_override_wins`.
+
+---
+
+## C. Daemon ↔ Responder (the dynamic to-and-fro)
+
+These scenarios require a responder loop. For QA, simulate one with a second terminal that re-submits the spec (advancing revision) or directly writes the next revision via `submit --session <sid>`. Real responder usage is via the `riview-respond` Claude Code skill (see `agents/riview-respond.md`).
+
+### C1 — Fresh revision shows empty overlay
+
+**Steps**
+1. From the A1 state (revision 1 has an overlay), the responder writes a new revision:
+   ```bash
+   # Edit $SAMPLE/spec.md to change something canonical (e.g. tweak one decision's body).
+   python3 scripts/riview.py submit $SAMPLE --session <sid>
+   ```
+2. Reload the browser tab on `/sessions/<sid>`.
+
+**Expected**
+- Page now shows revision 2 (check `<script id="submit-config">` for `base_revision: 2`).
+- All cards canonical: no overlay borders, comments empty, statuses match the new spec.
+- No `reviews/2/review.json` exists.
+
+**Auto-coverage:** Partial — `test_session_page_with_no_overlay_renders_empty_overlay_comments`.
+
+### C2 — Submit while responder watches `/wait`
+
+**Steps**
+1. In a second terminal: `python3 scripts/riview.py wait <sid>` (or curl `/sessions/<sid>/wait?cursor=N`).
+2. In the browser, edit and submit a card on revision 2.
+3. Watch the `wait` call return.
+
+**Expected**
+- The `wait` call returns 200 with the new event cursor as soon as the POST completes.
+- The responder (or its simulated stand-in) can then `pull` the latest review and apply it.
+
+**Auto-coverage:** `test_wait_wakes_on_review_post`, `test_cli_wait_unblocks_on_review_post`.
+
+### C3 — Stale base, no node change (clean accept)
+
+**Steps**
+1. On revision 2, open the page (base_revision=2). Edit a comment, but **do not submit yet**.
+2. In another terminal, responder rolls forward to revision 3 **without changing the node you're editing**:
+   ```bash
+   # Edit a different node's body in $SAMPLE/spec.md.
+   python3 scripts/riview.py submit $SAMPLE --session <sid>
+   ```
+3. Submit your card (still on the stale base_revision=2 page).
+4. Reload.
+
+**Expected**
+- Submit response: `accepted: [{node_id: <yours>}]`, `conflicts: []`, `current_revision: 3`.
+- After reload, the page is now on revision 3 with the overlay merged in.
+
+**Auto-coverage:** `test_stale_submit_accepts_unchanged_node_conflicts_changed_node`, `test_stale_submit_with_base_equal_current_is_clean_accept`.
+
+### C4 — Stale base, conflicting node change
+
+**Steps**
+1. On revision 3, open the page, edit a card's comment ("C4 pre-conflict"). Don't submit.
+2. Responder rolls forward to revision 4 **changing the same node's body**.
+3. Submit on the stale page.
+
+**Expected**
+- Submit response: `conflicts: [{node_id, reason: "fingerprint_mismatch", base_revision: 3, current_revision: 4}]`, `accepted: []`.
+- UI surfaces the conflict (the card stays touched; user has a path to reload).
+- No entry merged into `reviews/4/review.json` for that node.
+
+**Auto-coverage:** `test_stale_submit_accepts_unchanged_node_conflicts_changed_node`, `test_stale_submit_body_edit_detected_as_conflict`.
+
+### C5 — Multi-revision overlay isolation
+
+**Steps**
+1. Submit a card on revision 4 (overlay lands in `reviews/4/review.json`).
+2. Responder rolls forward to revision 5.
+3. Inspect `reviews/4/review.json` and `reviews/5/review.json`.
+
+**Expected**
+- `reviews/4/review.json` still holds the revision-4 overlay (history preserved).
+- `reviews/5/review.json` does **not** exist — overlay does not bleed forward.
+- Page on revision 5 renders canonical (no overlay).
+
+**Auto-coverage:** Partial (revision indexing is well-tested at the storage layer). **TODO**: add `test_overlay_isolated_per_revision` asserting the two files are independent.
+
+### C6 — `apply.py` never sees `cleared_fields`
+
+**Steps**
+1. Submit a card with `cleared_fields` (any A3/A4 scenario).
+2. Cat the resulting `reviews/N/review.json`.
+3. Run `apply.py` manually against that file + spec snapshot. `apply.py` rewrites the spec **in place**, so copy first for QA:
+   ```bash
+   cp -r $SAMPLE /tmp/qa-apply-out
+   python3 scripts/apply.py /tmp/qa-apply-out \
+     .riview/sessions/<sid>/reviews/N/review.json \
+     --basename spec --dry-run
+   ```
+
+**Expected**
+- `review.json` contains no `cleared_fields` key on any entry (stripped pre-persist).
+- `apply.py` runs to completion. Output spec matches expectations (cleared comments simply absent).
+
+**Auto-coverage:** None directly. **TODO**: add `test_persisted_review_strips_cleared_fields_marker`.
+
+### C7 — Responder pulls applied review, advances cleanly
+
+**Steps**
+1. Submit a multi-card review on the current revision.
+2. Simulate the responder loop:
+   ```bash
+   python3 scripts/riview.py pull <sid> > /tmp/qa-pull.json
+   diff /tmp/qa-pull.json .riview/sessions/<sid>/reviews/<current>/review.json
+   # Apply in place, then submit next revision (apply.py mutates $SAMPLE):
+   python3 scripts/apply.py $SAMPLE /tmp/qa-pull.json --basename spec
+   python3 scripts/riview.py submit $SAMPLE --session <sid>
+   ```
+3. Reload browser.
+
+**Expected**
+- `pull` output equals `review.json` byte-for-byte.
+- `apply.py` writes new spec content reflecting confirmed statuses, etc.
+- New revision page renders the applied state as canonical; previous overlay no longer needed.
+
+**Auto-coverage:** Apply path covered by existing apply tests; full responder loop is integration-only.
+
+---
+
+## D. Validation & error paths
+
+### D1 — Malformed `cleared_fields` → 400
+
+**Steps**
+```bash
+TOKEN=$(cat .riview/token)
+curl -i -X POST http://127.0.0.1:7891/sessions/<sid>/review \
+  -H "X-Riview-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"spec_id":"<id>","spec_version":1,"base_revision":1,
+       "reviews":[{"node_id":"some-id","cleared_fields":"comment"}]}'
+```
+Repeat with `cleared_fields: ["unknown_field"]`, `cleared_fields: [123]`, `cleared_fields: null`.
+
+**Expected**
+- All four return HTTP 400 with a clear error message. No mutation on disk.
+
+**Auto-coverage:** `test_cleared_fields_rejects_malformed_values`.
+
+### D2 — Empty entry silently filtered
+
+**Steps**
+```bash
+curl -i -X POST http://127.0.0.1:7891/sessions/<sid>/review \
+  -H "X-Riview-Token: $TOKEN" -H "Content-Type: application/json" \
+  -d '{"spec_id":"<id>","spec_version":1,"base_revision":1,
+       "reviews":[{"node_id":"some-id"}]}'
+```
+
+**Expected**
+- 200, `accepted: []`, no merge.
+
+**Auto-coverage:** `test_review_post_drops_empty_entries_silently`.
+
+### D3 — Unknown node_id
+
+**Steps** — same as D2 but with `node_id: "does-not-exist"`.
+
+**Expected**
+- 400 (or whatever the existing test asserts).
+
+**Auto-coverage:** `test_review_post_rejects_unknown_node_id`.
+
+### D4 — Bad token / missing token
+
+**Steps**
+- POST with no `X-Riview-Token` header.
+- POST with `X-Riview-Token: wrong`.
+
+**Expected**
+- 401 / 403 (per existing tests). No mutation.
+
+**Auto-coverage:** `test_review_post_requires_token`, `test_review_post_bad_token`.
+
+---
+
+## E. Cross-cutting
+
+### E1 — Overlay does not bleed into `node.review.comment`
+
+**Steps**
+1. Run any A scenario that submits comments.
+2. `cat .riview/sessions/<sid>/revisions/<N>/decisions.json | jq '.nodes[].review'`.
+
+**Expected**
+- Every node's `review.comment` is empty / absent. Comments live in `reviews/<N>/review.json` only, never in the per-revision sidecar.
+
+**Auto-coverage:** `test_overlay_does_not_persist_into_node_review_comment`.
+
+### E2 — Color-coding tracks status
+
+**Steps**
+1. Cycle one decision card through `ai-confident` → `confirmed` → `rejected` → `needs-work`, submitting + reloading between each.
+2. Confirm card border/background color shifts each time.
+3. Repeat for an ambiguity (`open` / `resolved` / `deferred`) and a risk (`open` / `accepted` / `mitigated` / `dismissed`).
+
+**Expected**
+- Color matches the status enum at every reload.
+- The "upstream changed" badge stays quiet on pure approvals (per `dc8e1f0`).
+
+**Auto-coverage:** None (CSS-only). Manual visual check.
+
+### E3 — Refresh during pending submit
+
+**Steps**
+1. Throttle network in devtools (e.g. 3G).
+2. Edit a card. Click Submit. Before the response arrives, hard-reload.
+3. Wait for everything to settle. Inspect `review.json` and the UI.
+
+**Expected**
+- Either the submit landed (overlay reflects it on reload) or it didn't (draft restored from localStorage, card touched). **Never** both partially applied.
+- No JS errors in console; no orphaned in-flight state.
+
+**Auto-coverage:** None (client-only race). Manual check.
+
+### E4 — Two browser tabs on the same session
+
+**Steps**
+1. Open `/sessions/<sid>` in tab A and tab B (same revision).
+2. In tab A, submit a card.
+3. In tab B (no reload), submit a *different* card.
+4. Reload both.
+
+**Expected**
+- Both submissions persist (they targeted different nodes; ADR-0005 by-node-id merge).
+- Both tabs after reload show both overlay entries, untouched.
+
+**Auto-coverage:** None directly. Single-tab semantics covered.
+
+### E5 — Two tabs editing the **same** card
+
+**Steps**
+1. Open `/sessions/<sid>` in tabs A and B.
+2. In A, submit a comment "tab-A".
+3. In B (still showing pre-submit state for that card), submit "tab-B" without reloading first.
+
+**Expected**
+- B's submit succeeds (same `base_revision`, fingerprint matches because the canonical node hasn't changed). The overlay entry ends up with `comment: "tab-B"` (last-write-wins by node_id).
+- A reload of A shows "tab-B". This is documented behavior, not a bug.
+
+**Auto-coverage:** None. **TODO** if we want it: `test_same_node_resubmit_last_write_wins`.
+
+---
+
+## Closing checklist
+
+After running through the plan:
+
+- [ ] All A scenarios pass.
+- [ ] B1 and B2 pass.
+- [ ] All C scenarios pass (use the simulated responder steps above; or run an actual `riview-respond` agent against the session for a higher-fidelity end-to-end).
+- [ ] All D scenarios return the right status codes; no mutation on rejections.
+- [ ] E1–E5 — note any surprises; the file-watch surprises are usually browser-side.
+- [ ] `python3 -m pytest tests/` still green after all runs.
+- [ ] `git status` shows only intentional changes (no stray `.riview/` content, no debugging files).
+
+## Tests to add (summary)
+
+Picked up from the "Auto-coverage" notes:
+
+- `test_ambiguity_resolution_overlay_lifecycle` — A5.
+- `test_body_edit_overlay_clears_via_cleared_fields` — A6.
+- `test_review_post_batch_mixed_entries_accepted` — A7.
+- `test_overlay_isolated_per_revision` — C5.
+- `test_persisted_review_strips_cleared_fields_marker` — C6.
+- `test_same_node_resubmit_last_write_wins` (optional) — E5.
+
+</script>
+
+<script>
+(() => {
+  "use strict";
+
+  const STORAGE_PREFIX = "riview:qa:v1:";
+  const SCENARIOS = Array.from(document.querySelectorAll(".scenario"));
+  const SECTIONS = ["setup", "a", "b", "c", "d", "e", "close"];
+  const SECTION_LABELS = {
+    setup: "Setup", a: "A · Website state", b: "B · Storage",
+    c: "C · Daemon ↔ Responder", d: "D · Validation",
+    e: "E · Cross-cutting", close: "Closing"
+  };
+  const SECTION_ANCHORS = {
+    setup: "#setup", a: "#sec-a", b: "#sec-b", c: "#sec-c",
+    d: "#sec-d", e: "#sec-e", close: "#closing"
+  };
+
+  function key(id, suffix) { return STORAGE_PREFIX + id + ":" + suffix; }
+
+  function readStatus(id) {
+    return localStorage.getItem(key(id, "status")) || "";
+  }
+  function writeStatus(id, value) {
+    if (value) localStorage.setItem(key(id, "status"), value);
+    else localStorage.removeItem(key(id, "status"));
+  }
+  function readStep(id, idx) {
+    return localStorage.getItem(key(id, "step:" + idx)) === "1";
+  }
+  function writeStep(id, idx, done) {
+    const k = key(id, "step:" + idx);
+    if (done) localStorage.setItem(k, "1");
+    else localStorage.removeItem(k);
+  }
+  function readNotes(id) {
+    return localStorage.getItem(key(id, "notes")) || "";
+  }
+  function writeNotes(id, text) {
+    const k = key(id, "notes");
+    if (text) localStorage.setItem(k, text);
+    else localStorage.removeItem(k);
+  }
+
+  // ---- Render per-scenario state ----
+  function applyStatus(scen, status) {
+    if (status) scen.dataset.status = status;
+    else delete scen.dataset.status;
+    const badge = scen.querySelector(".status-badge");
+    if (badge) badge.textContent = status || "pending";
+    scen.querySelectorAll(".scen-actions button").forEach(b => {
+      const act = b.dataset.act;
+      b.setAttribute("aria-pressed", act === status ? "true" : "false");
+    });
+  }
+
+  function hydrateScenario(scen) {
+    const id = scen.dataset.id;
+    applyStatus(scen, readStatus(id));
+
+    // steps
+    const steps = scen.querySelectorAll("ol.steps > li");
+    steps.forEach((li, idx) => {
+      // ensure each step has a checkbox; insert if missing
+      let cb = li.querySelector('input[type="checkbox"]');
+      if (!cb) {
+        cb = document.createElement("input");
+        cb.type = "checkbox";
+        li.appendChild(cb);
+      }
+      cb.checked = readStep(id, idx);
+      if (cb.checked) li.classList.add("done");
+      cb.addEventListener("change", () => {
+        writeStep(id, idx, cb.checked);
+        li.classList.toggle("done", cb.checked);
+        updateDashboard();
+      });
+    });
+
+    // status buttons
+    scen.querySelectorAll(".scen-actions button").forEach(b => {
+      b.addEventListener("click", () => {
+        const act = b.dataset.act;
+        const newStatus = (act === "clear") ? "" :
+          (readStatus(id) === act ? "" : act);
+        writeStatus(id, newStatus);
+        applyStatus(scen, newStatus);
+        updateDashboard();
+      });
+    });
+
+    // notes
+    const ta = scen.querySelector("textarea[data-notes]");
+    if (ta) {
+      ta.value = readNotes(id);
+      let timer = null;
+      ta.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => writeNotes(id, ta.value), 200);
+      });
+    }
+  }
+
+  // ---- Dashboard ----
+  function countsForSection(section) {
+    const inSec = SCENARIOS.filter(s => s.dataset.section === section);
+    const counts = { pass: 0, fail: 0, skip: 0, pending: 0, total: inSec.length };
+    inSec.forEach(s => {
+      const st = readStatus(s.dataset.id);
+      if (st === "pass") counts.pass++;
+      else if (st === "fail") counts.fail++;
+      else if (st === "skip") counts.skip++;
+      else counts.pending++;
+    });
+    return counts;
+  }
+
+  function updateDashboard() {
+    const dash = document.getElementById("dashboard");
+    dash.innerHTML = "";
+    let total = 0, pass = 0, fail = 0, skip = 0, pending = 0;
+    SECTIONS.forEach(section => {
+      const c = countsForSection(section);
+      if (c.total === 0) return;
+      total += c.total; pass += c.pass; fail += c.fail; skip += c.skip; pending += c.pending;
+      const card = document.createElement("div");
+      card.className = "dash-card";
+      card.innerHTML = `
+        <a href="${SECTION_ANCHORS[section]}">
+          <div class="label">${SECTION_LABELS[section]}</div>
+          <div class="count">${c.pass}<span style="color:var(--text-mute);font-weight:400">/${c.total}</span></div>
+          <div class="breakdown">✓ ${c.pass} · ✗ ${c.fail} · ~ ${c.skip} · · ${c.pending}</div>
+        </a>`;
+      dash.appendChild(card);
+    });
+
+    document.getElementById("cnt-pass").textContent = pass;
+    document.getElementById("cnt-fail").textContent = fail;
+    document.getElementById("cnt-skip").textContent = skip;
+    document.getElementById("cnt-pending").textContent = pending;
+    document.getElementById("cnt-total").textContent = total;
+
+    // section meta in headings
+    SECTIONS.forEach(section => {
+      const meta = document.querySelector(`[data-section-meta="${section}"]`);
+      if (!meta) return;
+      const c = countsForSection(section);
+      if (c.total === 0) { meta.textContent = ""; return; }
+      meta.textContent = `${c.pass}/${c.total} pass · ${c.fail} fail · ${c.skip} skip`;
+    });
+
+    // progress bar — % of non-pending decisions made
+    const decided = pass + fail + skip;
+    const pct = total > 0 ? Math.round((decided / total) * 100) : 0;
+    document.getElementById("progress-fill").style.width = pct + "%";
+  }
+
+  // ---- Controls ----
+  document.getElementById("btn-expand").addEventListener("click", () => {
+    document.querySelectorAll(".scenario").forEach(d => d.open = true);
+  });
+  document.getElementById("btn-collapse").addEventListener("click", () => {
+    document.querySelectorAll(".scenario").forEach(d => d.open = false);
+  });
+
+  // Theme: dark default, toggles light. Stored.
+  const themeBtn = document.getElementById("btn-theme");
+  function applyTheme(t) {
+    if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+    else document.documentElement.removeAttribute("data-theme");
+    localStorage.setItem(STORAGE_PREFIX + "_theme", t || "dark");
+  }
+  applyTheme(localStorage.getItem(STORAGE_PREFIX + "_theme") || "");
+  themeBtn.addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme");
+    applyTheme(cur === "light" ? "dark" : "light");
+  });
+
+  // Reset
+  document.getElementById("btn-reset").addEventListener("click", () => {
+    if (!confirm("Reset all QA progress (status, step checkmarks, notes)?")) return;
+    Object.keys(localStorage).forEach(k => {
+      if (k.startsWith(STORAGE_PREFIX) && k !== STORAGE_PREFIX + "_theme") {
+        localStorage.removeItem(k);
+      }
+    });
+    // Reload to re-hydrate cleanly
+    location.reload();
+  });
+
+  // Export to JSON file
+  document.getElementById("btn-export").addEventListener("click", () => {
+    const data = {
+      exported_at: new Date().toISOString(),
+      scenarios: {}
+    };
+    SCENARIOS.forEach(s => {
+      const id = s.dataset.id;
+      const stepsTotal = s.querySelectorAll("ol.steps > li").length;
+      const stepsDone = [];
+      for (let i = 0; i < stepsTotal; i++) {
+        if (readStep(id, i)) stepsDone.push(i + 1);
+      }
+      data.scenarios[id] = {
+        section: s.dataset.section,
+        title: s.querySelector(".scen-title")?.textContent.trim() || "",
+        status: readStatus(id) || "pending",
+        steps_done: stepsDone,
+        steps_total: stepsTotal,
+        notes: readNotes(id)
+      };
+    });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "riview-qa-run-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  // ---- Source view: dump the embedded markdown verbatim ----
+  const rawScript = document.getElementById("raw-source");
+  if (rawScript) {
+    document.getElementById("raw-source-output").textContent = rawScript.textContent.trim();
+  }
+
+  // ---- Init ----
+  SCENARIOS.forEach(hydrateScenario);
+  updateDashboard();
+})();
+</script>
+
+</body>
+</html>
