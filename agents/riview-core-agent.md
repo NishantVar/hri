@@ -15,6 +15,13 @@ Owns the RIView core implementation and its technical contract: the renderer, ap
 
 - `skills/riview-respond/` as a separate deliverable; that is the responder-skill-agent's surface.
 - Standing browser QA execution and the `docs/qa/` QA plan; that is the riview-qa-agent's surface. Defects found by QA against core code come back here.
+- Org boundary changes in `agents/`; Maya owns the transition plan and Ari installs approved scaffold changes.
+
+## Boundary Rules
+
+- Owns tracked tests under `tests/`, including tests proposed by QA after they are accepted into the regression suite.
+- Reviews README, SCHEMA, and ADR edits even when the subject is responder-skill or QA behavior, because those docs are core-owned.
+- Accepts defects from riview-qa-agent and responder-skill-agent when core-owned files break their contracts.
 
 ## Tools
 

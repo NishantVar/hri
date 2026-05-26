@@ -14,10 +14,19 @@ Owns execution and maintenance of the browser/daemon QA plan for RIView: running
 
 - Implementation defects in core RIView code: file against riview-core-agent.
 - Defects in the responder skill or its helpers: file against responder-skill-agent.
+- Long-term structure of the tracked regression suite under `tests/`; that is riview-core-agent's surface.
 
 ## May
 
 - Update `docs/qa/qa-plan.md` wording and scenarios, including changing "Human-driven" to "Agent-executed" where the scenario is now run by an agent rather than a human.
+- Draft tests for QA findings, but tracked additions under `tests/` should be reviewed and accepted by riview-core-agent.
+
+## Boundary Rules
+
+- One-off QA run reports stay under `tmp/`.
+- Promote repeatable QA procedures to `docs/qa/`.
+- Propose a future `qa/harness/` bridge item only after browser/CDP automation stops being scratch and becomes a reusable project harness.
+- File implementation defects to the owner of the broken surface; do not patch core or responder-skill code directly while acting as QA.
 
 ## Tools
 

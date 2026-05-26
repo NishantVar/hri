@@ -11,6 +11,13 @@ Owns the `riview-respond` skill: the agent-side workflow that pulls a Review del
 
 - Daemon and session internals (`scripts/riview.py`), except where the skill contract depends on them. Changes to that internal API that break the skill come back here as a defect.
 - The browser QA plan and its execution; that is the riview-qa-agent.
+- README, SCHEMA, or ADR files directly; those are riview-core-agent surfaces, even when they document responder-skill behavior.
+
+## Boundary Rules
+
+- When the skill contract changes, draft or file the needed README/ADR cross-reference updates for riview-core-agent to land.
+- If a daemon/API change is needed for the skill, file the core change to riview-core-agent instead of editing `scripts/riview.py` directly.
+- Skill-local helper tests and smoke checks belong under `skills/riview-respond/tools/`; broader daemon/session tests belong under core-owned `tests/`.
 
 ## Tools
 

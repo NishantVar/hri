@@ -40,6 +40,35 @@ Three starter agents, no further splits yet.
 - `docs/qa/qa-plan.html` has been rehomed from `humans/qa-plan.html`. The empty `humans/` directory has been removed.
 - `tmp/` is now gitignored. Its contents (`tmp/chrome-qa/`, `tmp/node-cdp/`, QA driver reports, this transition's scratch files) remain on disk but stay out of git history.
 
+## Operating rules for ownership boundaries
+
+These rules are part of the org design. Update them before taking work that would otherwise cross an unclear boundary.
+
+### Org artifacts
+
+- `agents/org-transition-plan.md` is owned by Maya, the org-designer. It records approved role boundaries, bridge items, deferrals, and completed org moves.
+- Files under `agents/<role>.md` are owned by the role they define for factual upkeep, but changes that alter ownership boundaries, create or retire roles, or move artifact homes require Maya review and an org-transition-plan update.
+- Ari, the agent-architect-agent, implements approved agent scaffolding and role-file changes. Ari does not independently redefine ownership.
+
+### Cross-surface edits
+
+- The file's primary owner owns the final edit, even when the content discusses another role's surface.
+- A role whose contract changes must file or draft the needed cross-reference updates for the owning role. Example: responder-skill-agent owns the `riview-respond` contract, but README and ADR updates about that contract land through riview-core-agent because those docs are core-owned.
+- If two roles disagree about whether a file belongs to one surface or another, pause the implementation and update this plan instead of letting the next code change decide by accident.
+
+### Tests and QA findings
+
+- `tests/` is a core-owned tracked regression suite. riview-core-agent owns its structure and long-term maintenance.
+- riview-qa-agent may propose or draft tests that encode QA findings, but tracked test additions under `tests/` should be reviewed and accepted by riview-core-agent.
+- Browser/daemon scenario execution, QA notes, and one-off run reports stay with riview-qa-agent under `tmp/` unless promoted.
+- Promote a QA artifact out of `tmp/` only when it becomes repeatable project documentation or a reusable harness. Repeatable procedures belong under `docs/qa/`; reusable automation may justify a future `qa/harness/` bridge item.
+
+### Documentation overlap
+
+- README, SCHEMA, and ADRs are core-owned even when they describe responder-skill or QA behavior.
+- The subject-matter role is accountable for noticing stale cross-references in core-owned docs and filing the correction to riview-core-agent.
+- `docs/qa/` is QA-owned. Core and responder-skill agents may file defects against it when implementation behavior changes, but riview-qa-agent owns the plan's wording and scenario shape.
+
 ## Explicit deferrals
 
 The following are intentionally **not** created or moved in this pass:
