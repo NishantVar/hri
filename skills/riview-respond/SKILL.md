@@ -177,6 +177,7 @@ You read the whole spec to keep edits globally coherent, but the write set is bo
 
 - **`$RIVIEW_REPO/skills/riview-respond/tools/preflight.py <session_id>`** — drift check; exit 0 means safe to write. Reads `$RIVIEW_HOME` (defaults `~/.riview`).
 - **`$RIVIEW_REPO/skills/riview-respond/tools/snapshot.py <session_id>`** — JSON snapshot of `{current_revision, event_seq, status, review_hash}`. Used by the stale-review guard.
+- **`$RIVIEW_REPO/skills/riview-respond/tools/selftest.py`** — skill-local sanity check. py_compiles the helpers and exercises their CLIs (help, missing session, matching fixture, drift, review_hash) against a synthetic `$RIVIEW_HOME` in a tempdir. No daemon, no live session. Exit 0 = healthy.
 - This skill is model-agnostic. The LLM call each cycle is the calling agent's own turn (Claude Code today; Codex or Gemini tomorrow). Do not hardcode a model recommendation.
 
 ## Installation
