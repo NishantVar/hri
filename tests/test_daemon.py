@@ -86,6 +86,49 @@ class RiviewDaemonTests(unittest.TestCase):
         self.assertIn(sid, body)
         self.assertIn("Pomodoro", body)
 
+    def test_cli_urls_reflect_daemon_port(self):
+        # Regression: when the daemon runs on a non-default port, the CLI
+        # commands that print a session URL (submit, list, open) must use
+        # that port, not the hardcoded DEFAULT_PORT (7891). See the daemon
+        # `port` sidecar file written by `cmd_daemon`.
+        self.assertNotEqual(
+            self.port,
+            7891,
+            "test pre-condition: free port collided with DEFAULT_PORT",
+        )
+        submit = subprocess.run(
+            RIVIEW_CLI + ["submit", str(SAMPLE)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(submit.stdout.strip().splitlines()[-1])
+        sid = payload["session_id"]
+        expected = f"http://127.0.0.1:{self.port}/sessions/{sid}"
+        self.assertEqual(payload["url"], expected)
+
+        opened = subprocess.run(
+            RIVIEW_CLI + ["open", sid],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(opened.stdout.strip(), expected)
+
+        listed = subprocess.run(
+            RIVIEW_CLI + ["list"],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        rows = json.loads(listed.stdout)
+        matches = [r for r in rows if r["session_id"] == sid]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["url"], expected)
+
     def test_session_page_renders(self):
         sid = self._submit_sample()
         body = urllib.request.urlopen(self.base + f"/sessions/{sid}").read().decode("utf-8")

@@ -23,6 +23,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import sys
 import tempfile
 import threading
@@ -275,8 +276,27 @@ def validate_spec_pair(md_bytes: bytes, sidecar: dict) -> list[str]:
     return render.validate(sidecar, anchor_counts)
 
 
+def daemon_port_path() -> Path:
+    return riview_home() / "port"
+
+
+def daemon_port() -> int:
+    """Port advertised by the running daemon, or DEFAULT_PORT as a fallback.
+
+    `cmd_daemon` writes the actual bound port to `<RIVIEW_HOME>/port` at
+    startup and removes it on clean shutdown, so the CLI can print URLs
+    that reach the daemon even when it was started with `--port` on a
+    non-default port. Falls back to DEFAULT_PORT when the file is missing
+    (no daemon has run in this RIVIEW_HOME yet) or unreadable.
+    """
+    try:
+        return int(daemon_port_path().read_text("utf-8").strip())
+    except (OSError, ValueError):
+        return DEFAULT_PORT
+
+
 def session_url(sid: str) -> str:
-    return f"http://127.0.0.1:{DEFAULT_PORT}/sessions/{sid}"
+    return f"http://127.0.0.1:{daemon_port()}/sessions/{sid}"
 
 
 class CommandError(Exception):
@@ -1256,16 +1276,32 @@ def cmd_daemon(args) -> int:
     token = ensure_token()
     server = ThreadingHTTPServer((host, port), RIViewHandler)
     server.riview_token = token  # type: ignore[attr-defined]
+    actual_port = server.server_address[1]
+    port_file = daemon_port_path()
+    port_file.parent.mkdir(parents=True, exist_ok=True)
+    port_file.write_text(f"{actual_port}\n", encoding="utf-8")
     sys.stderr.write(
-        f"riview daemon listening on http://{host}:{port}/ "
+        f"riview daemon listening on http://{host}:{actual_port}/ "
         f"(token at {token_path()})\n"
     )
+
+    def _on_signal(signum, frame):  # noqa: ARG001
+        raise KeyboardInterrupt
+    # Translate SIGTERM into the same shutdown path as Ctrl+C so the
+    # `finally` block runs and the port sidecar is cleaned up. Supervisors
+    # and the daemon test harness both terminate via SIGTERM.
+    signal.signal(signal.SIGTERM, _on_signal)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         sys.stderr.write("\nriview daemon shutting down\n")
     finally:
         server.server_close()
+        try:
+            port_file.unlink()
+        except OSError:
+            pass
     return 0
 
 
