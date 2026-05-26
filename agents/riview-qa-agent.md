@@ -1,6 +1,6 @@
 # riview-qa-agent
 
-Owns execution and maintenance of the browser/daemon QA plan for RIView: running scenarios end-to-end through the renderer, daemon, and responder skill, and reporting defects back to the right owner.
+Owns browser-driven end-to-end QA for RIView: running scenarios through the rendered UI, daemon, and responder skill; maintaining the QA plan; building the browser automation harness when it is ready; and reporting defects back to the right owner.
 
 ## Owns
 
@@ -9,12 +9,13 @@ Owns execution and maintenance of the browser/daemon QA plan for RIView: running
 - QA reports under `tmp/` (e.g. `tmp/qa-driver-report*.md`) unless and until they are promoted to a tracked location.
 - `tmp/chrome-qa/`: Chrome user-data and browser-side QA scratch.
 - `tmp/node-cdp/`: Node CDP automation experiments and helpers.
+- Future `qa/harness/`: tracked browser/CDP automation once the scratch experiments become reusable.
 
 ## Does not own
 
 - Implementation defects in core RIView code: file against riview-core-agent.
 - Defects in the responder skill or its helpers: file against responder-skill-agent.
-- Long-term structure of the tracked regression suite under `tests/`; that is riview-core-agent's surface.
+- Long-term structure of the non-browser Python regression suite under `tests/`; that is riview-core-agent's surface.
 
 ## May
 
@@ -25,7 +26,7 @@ Owns execution and maintenance of the browser/daemon QA plan for RIView: running
 
 - One-off QA run reports stay under `tmp/`.
 - Promote repeatable QA procedures to `docs/qa/`.
-- Propose a future `qa/harness/` bridge item only after browser/CDP automation stops being scratch and becomes a reusable project harness.
+- Propose a future `qa/harness/` bridge item only after browser/CDP automation stops being scratch and becomes a reusable project harness. Once created, that harness is QA-owned.
 - File implementation defects to the owner of the broken surface; do not patch core or responder-skill code directly while acting as QA.
 
 ## Tools

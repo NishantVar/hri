@@ -11,8 +11,8 @@ Three starter agents, no further splits yet.
 ### 1. riview-core-agent
 
 - **Definition:** [riview-core-agent.md](riview-core-agent.md)
-- **Owns:** RIView core implementation and technical contract: `scripts/`, [SCHEMA.md](../SCHEMA.md), [README.md](../README.md), [docs/adr/](../docs/adr/), `sample/`, `tests/`.
-- **Boundaries:** does not own `skills/riview-respond/` as a separate deliverable; does not own standing browser QA execution.
+- **Owns:** RIView core implementation and technical contract: `scripts/`, [SCHEMA.md](../SCHEMA.md), [README.md](../README.md), [docs/adr/](../docs/adr/), `sample/`, and non-browser Python regression tests under `tests/`.
+- **Boundaries:** does not own `skills/riview-respond/` as a separate deliverable; does not own browser-driven end-to-end QA or its future harness.
 - **Tools:** unittest/pytest, RIView CLI, daemon, fixtures.
 - **Evidence:** `scripts/render.py`, `scripts/riview.py`, `scripts/apply.py`, twelve ADRs, schema, sample fixtures.
 
@@ -27,7 +27,7 @@ Three starter agents, no further splits yet.
 ### 3. riview-qa-agent
 
 - **Definition:** [riview-qa-agent.md](riview-qa-agent.md)
-- **Owns:** execution and maintenance of the browser/daemon QA plan: `docs/qa/`, `docs/qa/qa-plan.html` (after rehome), QA reports under `tmp/` unless later promoted, `tmp/chrome-qa`, `tmp/node-cdp` experiments.
+- **Owns:** browser-driven end-to-end QA for RIView: `docs/qa/`, `docs/qa/qa-plan.html` (after rehome), QA reports under `tmp/` unless later promoted, `tmp/chrome-qa`, `tmp/node-cdp` experiments, and any future tracked browser automation harness.
 - **Boundaries:** files implementation defects to riview-core-agent; files responder-skill defects to responder-skill-agent.
 - **May:** update `docs/qa/qa-plan.md` wording and scenarios, including replacing "Human-driven" with "Agent-executed".
 - **Tools:** browser/CDP automation, curl, pytest/unittest, RIView daemon.
@@ -58,10 +58,11 @@ These rules are part of the org design. Update them before taking work that woul
 
 ### Tests and QA findings
 
-- `tests/` is a core-owned tracked regression suite. riview-core-agent owns its structure and long-term maintenance.
-- riview-qa-agent may propose or draft tests that encode QA findings, but tracked test additions under `tests/` should be reviewed and accepted by riview-core-agent.
+- `tests/` is the core-owned tracked Python regression suite. riview-core-agent owns its structure and long-term maintenance.
+- Browser-controlled end-to-end tests are QA-owned, whether they are still scratch scripts under `tmp/` or later promoted to a tracked harness.
+- riview-qa-agent may propose or draft Python tests that encode QA findings, but tracked additions under `tests/` should be reviewed and accepted by riview-core-agent.
 - Browser/daemon scenario execution, QA notes, and one-off run reports stay with riview-qa-agent under `tmp/` unless promoted.
-- Promote a QA artifact out of `tmp/` only when it becomes repeatable project documentation or a reusable harness. Repeatable procedures belong under `docs/qa/`; reusable automation may justify a future `qa/harness/` bridge item.
+- Promote a QA artifact out of `tmp/` only when it becomes repeatable project documentation or a reusable browser harness. Repeatable procedures belong under `docs/qa/`; reusable browser automation should become a QA-owned `qa/harness/` bridge item.
 
 ### Documentation overlap
 
@@ -78,7 +79,7 @@ The following are intentionally **not** created or moved in this pass:
 - No further role splits yet: `renderer-ui-agent`, `runtime-daemon-agent`, `schema-steward-agent`, `docs-agent`, `release-agent`, and `research-agent` remain folded into the three starter roles above.
 - No code refactors as part of this transition.
 
-These are deferred, not rejected. They can be revisited once the starter roster has run for a while and we can see which boundaries actually chafe.
+These are deferred, not rejected. In particular, `qa/harness/` should be created once browser/CDP automation has stopped being scratch and is ready to be a reusable tracked QA harness.
 
 ## Completed moves
 
