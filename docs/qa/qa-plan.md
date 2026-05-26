@@ -1,6 +1,6 @@
 # RIView end-to-end QA plan
 
-Human-driven test plan for the website + daemon + responder loop. Each scenario lists steps, the expected outcome, and whether automated coverage exists in `tests/test_daemon.py`.
+Agent-executed test plan for the website + daemon + responder loop. Each scenario lists steps, the expected outcome, and whether automated coverage exists in `tests/test_daemon.py`.
 
 Out of scope: anything covered exclusively by the test suite that has no UX surface (e.g. token file permissions). Run `python3 -m pytest tests/` before starting.
 
@@ -196,7 +196,7 @@ rm -rf .riview/sessions/<sid>/reviews/*/review.json
 
 ## C. Daemon ↔ Responder (the dynamic to-and-fro)
 
-These scenarios require a responder loop. For QA, simulate one with a second terminal that re-submits the spec (advancing revision) or directly writes the next revision via `submit --session <sid>`. Real responder usage is via the `riview-respond` Claude Code skill (see `agents/riview-respond.md`).
+These scenarios require a responder loop. For QA, simulate one with a second terminal that re-submits the spec (advancing revision) or directly writes the next revision via `submit --session <sid>`. Real responder usage is via the `riview-respond` Claude Code skill (see `skills/riview-respond/SKILL.md`).
 
 ### C1 — Fresh revision shows empty overlay
 
